@@ -1,4 +1,4 @@
-In this project, I'm working through the material in Senn's (2002) text, Cross-over trials in clinical research*](http://www.senns.uk/cticr2.html).
+In this project, I'm working through the material in Senn's (2002) text, [*Cross-over trials in clinical research*](http://www.senns.uk/cticr2.html).
 ## Code of conduct
 
 I don't care if you come off as professional or not, but please try to be kind.
