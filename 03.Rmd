@@ -1,0 +1,1018 @@
+---
+title: '03: The AB/BA design with normal data'
+author: "A Solomon Kurz"
+date: "`r format(Sys.Date())`"
+output:
+  github_document
+always_allow_html: true  
+---
+
+## 3.1 An example
+
+The chapter begins with:
+
+> The simplest of all cross-over designs is the AB/BA cross-over. (p. 25)
+
+We can find code for the example from [http://www.senns.uk/CTiCR/CTICR2Programs.htm#R](http://www.senns.uk/CTiCR/CTICR2Programs.htm#R).
+
+```{r, warning = F, message = F}
+# load packages
+library(tidyverse)
+library(flextable)
+library(broom)
+library(marginaleffects)
+library(lme4)
+library(broom.mixed)
+
+# Input data
+n1 <- 7 #number of patients first sequence
+n2 <- 6 #number of patients second sequence
+n <- n1 + n2
+
+seqn <- factor((c(rep(1,n1), rep(2,n2), rep(1,n1), rep(2,n2))),
+               labels = c("forsal","salfor")) #sequences
+
+patient <- factor(rep(c("1","4","6","7","10","11","14","2","3","5","9","12","13"), 2),
+                  levels = 1:14) 
+
+# not in the original code, but here is sex
+sex <- c("male", "female", "female", "male", "male", "female", "male", "male", "male", "female", "male", "male", "male")
+
+period <- factor(c(rep("1", n), rep("2", n)))
+
+treat <- factor(c(rep(2, n1), rep(1, n2), rep(1, n1), rep(2, n2)),
+                labels = c("salbutamol", "formoterol"))
+
+#Note: "formoterol" is coded second level of factor
+pef <- c(310, 310,370,410,250,380,330,370,310,380,290,260,90,270,260,300,390,210,350,365,385,400,410,320,340,220)
+base <- c(290,300,250,390,250,365,190,350,350,350,280,270,220,270,270,210,390,240,380,260,345,370,360,290,310,220)
+
+d <- tibble(
+  seqn = seqn,
+  patient = patient,
+  period = period,
+  treat = treat,
+  pef = pef,
+  base = base
+) %>% 
+  arrange(period, as.double(as.character(patient))) %>% 
+  mutate(sex = c(sex, sex))
+
+# what?
+head(d)
+```
+
+What might not be obvious with this arrangement is each `patient` has two rows. This is easier to see with help from `arrange()`.
+
+```{r}
+d %>% 
+  arrange(patient, period) %>% 
+  head()
+```
+
+Here's how to make a version of the little table at the bottom of page 35.
+
+```{r}
+d %>% 
+  mutate(period = str_c("period ", period),
+         sequence = ifelse(seqn == "forsal", "for/sal", "sal/for")) %>% 
+  distinct(sequence, period, treat) %>% 
+  pivot_wider(names_from = period, values_from = treat) %>% 
+  flextable() %>% 
+  width(width = 1.2)
+```
+
+The wash-out period isn't explicitly encoded in the data, but it's implied. Anyway, in this study salbutamol was a well-established treatment for asthma, and formoterol was a promising alternative treatment (p. 35). Participants were 13 children (7-14 y/o) with moderate to sever asthma. The wash-oupt periods were at least one day. 
+
+I don't love the way Senn presented the data in his plots. There are any number of ways to show them. Here are two:
+
+```{r, message = F}
+d %>%
+  mutate(letter = str_extract(treat, "^.{1}"),
+         sequence = ifelse(seqn == "forsal", "for/sal", "sal/for")) %>% 
+
+  ggplot(aes(x = period, y = pef))  +
+  geom_line(aes(group = patient),
+            linewidth = 1/4, alpha = 1/2) +
+  geom_point(aes(color = treat, shape = treat),
+             size = 3.5) +
+  geom_text(aes(label = letter),
+            size = 3) +
+  scale_color_viridis_d(NULL, option = "D", begin = .7, end = .9) +
+  scale_shape(NULL) +
+  labs(title = "Person-level trajectories",
+       y = "PEF (l/min)") +
+  facet_wrap(~ sequence)
+
+d %>%
+  mutate(letter = str_extract(treat, "^.{1}"),
+         sequence = ifelse(seqn == "forsal", "for/sal", "sal/for")) %>% 
+  group_by(period, sequence, treat, letter) %>% 
+  summarise(pef = mean(pef)) %>% 
+
+  ggplot(aes(x = period, y = pef))  +
+  geom_line(aes(group = sequence),
+            linewidth = 1/2) +
+  geom_point(aes(color = treat, shape = treat),
+             size = 4.5) +
+  geom_text(aes(label = letter),
+            size = 4) +
+  scale_color_viridis_d(NULL, option = "D", begin = .7, end = .9) +
+  scale_shape(NULL) +
+  ylim(range(d$pef)) +
+  labs(title = "Group-level trajectories",
+       y = "PEF (l/min)") +
+  facet_wrap(~ sequence)
+```
+
+With so few participants, it's hard to get a sense of the overall findings without resorting to the group averages (second plot).
+
+Another way to look at the data is to nudge the values on the x-axis by `treat` and drop the facets.
+
+```{r}
+# for x-axis offsets
+nudge_value <- 0.04
+
+d %>%
+  mutate(letter = str_extract(treat, "^.{1}"),
+         sequence = ifelse(seqn == "forsal", "for/sal", "sal/for")) %>% 
+  mutate(period = as.double(period)) %>% 
+  mutate(period = ifelse(treat == "formoterol", period - nudge_value, period + nudge_value)) %>% 
+
+  ggplot(aes(x = period, y = pef))  +
+  geom_line(aes(group = patient),
+            linewidth = 1/4, alpha = 1/2) +
+  geom_point(aes(color = treat, shape = treat),
+             size = 3.5) +
+  geom_text(aes(label = letter, group = treat),
+            size = 3) +
+  scale_x_continuous(breaks = 1:2, expand = expansion(mult = 0.4)) +
+  scale_color_viridis_d(NULL, option = "D", begin = .7, end = .9) +
+  scale_shape(NULL) +
+  labs(title = "Person-level trajectories (no facets)",
+       y = "PEF (l/min)") +
+  theme(panel.grid.minor.x = element_blank())
+```
+
+Here's a `flextable()`-based version of Table 3.1 (p. 36).
+
+```{r}
+d %>% 
+  mutate(period = str_c("period ", period),
+         sequence = ifelse(seqn == "forsal", "for/sal", "sal/for"),
+         patient = as.double(patient)) %>% 
+  select(sequence, patient, period, pef) %>%
+  pivot_wider(names_from = period, values_from = pef) %>% 
+  mutate(difference = `period 1` - `period 2`,
+         total = `period 1` + `period 2`) %>% 
+  arrange(sequence, patient) %>% 
+  as_grouped_data(groups = c("sequence")) %>% 
+  flextable() %>% 
+  padding(padding.top = 2, padding.bottom = 2, part = "all")
+```
+
+Here's a version of Senn's depiction of the data in his Figure 3.1 (p. 37).
+
+```{r}
+d %>% 
+  mutate(patient = factor(patient, levels = 1:14),
+         sequence = ifelse(seqn == "forsal", "for/sal", "sal/for")) %>% 
+  
+  ggplot(aes(x = patient, y = pef)) +
+  geom_point(aes(shape = treat)) +
+  scale_shape_manual(values = c(0, 4)) +
+  facet_wrap(~ sequence) +
+  theme(panel.grid = element_blank())
+```
+
+Though in many respects I hate this plot, I do have to admit it does a pretty good job showing how, within each child, formoterol usually resulted in higher `pef` values than salbutamol.
+
+## 3.2 A simple analysis ignoring the effect of period
+
+Back in our Table 3.1, we calculated difference scores based on the time period, which Senn referred to as a *period difference* on page 38. This is natural in many data contexts, but probably isn't the best way to think about these data. Rather, what we probably want is a difference in treatments, which Senn called the *cross-over difference* (p. 38). He shows the overall framework for that kind of difference in his Table 3.2, which we recreate here.
+
+```{r}
+d %>% 
+  mutate(sequence = ifelse(seqn == "forsal", "for/sal", "sal/for"),
+         patient = as.double(patient)) %>% 
+  select(sequence, patient, treat, pef) %>%
+  pivot_wider(names_from = treat, values_from = pef) %>% 
+  mutate(difference = formoterol - salbutamol) %>% 
+  arrange(sequence, patient) %>% 
+  as_grouped_data(groups = c("sequence")) %>% 
+  flextable() %>% 
+  padding(padding.top = 2, padding.bottom = 2, part = "all")
+```
+
+We can plot those differences with our version of Figure 3.2.
+
+```{r}
+d %>% 
+  mutate(sequence = ifelse(seqn == "forsal", "for/sal", "sal/for")) %>% 
+  select(sequence, patient, treat, pef) %>%
+  pivot_wider(names_from = treat, values_from = pef) %>% 
+  mutate(difference = formoterol - salbutamol) %>% 
+  
+  ggplot(aes(x = patient, y = difference)) +
+  geom_hline(yintercept = 0, color = "white") +
+  geom_point() +
+  ggtitle("Participant-level contrasts (formoterol - salbutamol)") +
+  facet_wrap(~ sequence) +
+  theme(panel.grid = element_blank())
+```
+
+Here are the sample mean and standard deviation for those difference scores.
+
+```{r}
+d %>% 
+  select(patient, treat, pef) %>% 
+  pivot_wider(names_from = treat, values_from = pef) %>% 
+  mutate(dif = formoterol - salbutamol) %>% 
+  summarise(m = mean(dif),
+            s = sd(dif))
+```
+
+Here's the $t$-test for the unconditional difference (i.e., `formoterol` - `salbutamol`).
+
+```{r}
+fit3.1 <- lm(
+  data = d %>% 
+    select(patient, treat, pef) %>% 
+    pivot_wider(names_from = treat, values_from = pef) %>% 
+    mutate(dif = formoterol - salbutamol),
+  dif ~ 1
+) 
+
+summary(fit3.1)
+```
+
+Even though we did our $t$-test with an intercept-only model of the difference scores, you'll note the point estimate and standard error are the same as the more conventional $t$-test values Senn reported at the top of page 40.
+
+We can compute the 95% CI's with the `confint()` function.
+
+```{r}
+confint(fit3.1)
+```
+
+## 3.3 Student's approach*
+
+This section was an historical digression.
+
+## 3.4 Assumptions in the matched-pairs $t$ approach
+
+On page 42, Senn opened the section with the question: "Are there any factors that might cause the crossover differences not to be distributed at random about the true treatment effect?"
+
+He then entertained 5 possible factors for a non-random distribution. The first had to do with a possible *period effect*. To get a sense, here we use summary statistics to compute the mean and SD for the difference score, by `seqn`.
+
+```{r}
+d %>% 
+  select(patient, treat, pef, seqn) %>% 
+  pivot_wider(names_from = treat, values_from = pef) %>% 
+  mutate(dif = formoterol - salbutamol) %>% 
+  group_by(seqn) %>% 
+  summarise(m = mean(dif),
+            s = sd(dif))
+```
+
+This large of a difference may or may not be a problem, but it's certainty worthy of our attention.
+
+A second factor might be a *period by treatment interaction*.
+
+A third factor that might interfere with simple random variation the differences is a *carry-over* effect, and it's possible the magnitude of this effect could vary by treatments. One of the difficulties with this data set is the interval between the 2 treatment days varied from 1 day to 3.5 months, though it was 2 days for most.
+
+A fourth factor is a possible *patient by treatment interaction*, meaning wide person-level treatment effects not well captured by an ATE. In general, however, "patent by treatment interactions cannot be investigated in a two-period treatment cross-over: designs are needed in which patients are given the same treatment a number of times" (p. 44). However, you can assess for this in part based on background variables. In these data, for example, you might wonder if `sex` might cover some of an possible variation. To see, here we compute the summary statistics by `sex`.
+
+```{r}
+d %>% 
+  select(patient, treat, pef, sex) %>% 
+  pivot_wider(names_from = treat, values_from = pef) %>% 
+  mutate(dif = formoterol - salbutamol) %>% 
+  group_by(sex) %>% 
+  summarise(m = mean(dif),
+            s = sd(dif),
+            n = n())
+```
+
+That summary corresponds to some of the sample statistics at the bottom of Table 3.3.
+
+We can extend our difference-score model version of the simple paired-sample $t$-test from above to accommodate a two-sample $t$-test by adding `sex` as a covariate in the model.
+
+Here's the model conditioned on `sex`.
+
+```{r}
+fit3.2 <- lm(
+  data = d %>% 
+    select(patient, treat, pef, sex) %>% 
+    pivot_wider(names_from = treat, values_from = pef) %>% 
+    mutate(dif = formoterol - salbutamol),
+  dif ~ 1 + sex
+)
+
+summary(fit3.2)
+```
+
+This corresponds with the $t$-test in Table 3.3. Since we did the subtraction in reverse, the sign for the $t$-value is reversed. We will not, however, be breaking down the data to compute the corrected sums and so on.
+
+A fifth factor is a possible *patient by period interaction*, which can happen when the period-based trends differ by persons.
+
+Of these five factors, the second (*period by treatment interaction*) and third (*carry-over*), "have long been considered to be the major problems of cross-over designs" (p. 45). We'll deal with these later in the chapter.
+
+First, however, we focus on a simple way to address the first factor (*period effects*).
+
+## 3.5 Adjusting for a period effect: Two-sample $t$ approach
+
+Compute the summary statistics for the `period`-based difference, by `seqn`.
+
+```{r}
+d %>% 
+  select(patient, seqn, pef, period) %>% 
+  pivot_wider(names_from = period, values_from = pef) %>% 
+  mutate(dif = `1` - `2`) %>% 
+  group_by(seqn) %>% 
+  summarise(m = mean(dif),
+            s = sd(dif),
+            n = n())
+```
+
+Here's the conditional model, which corresponds to the two-sample $t$-test analysis in Table 3.4 (p. 46).
+
+```{r}
+fit3.3 <- lm(
+  data = d %>% 
+    select(patient, seqn, pef, period) %>% 
+    pivot_wider(names_from = period, values_from = pef) %>% 
+    mutate(dif = `1` - `2`),
+  dif ~ 1 + seqn
+)
+
+summary(fit3.3)  
+```
+
+Our difference in means is the same as reported in line 4 of Table 3.4, but with the sign flipped. The standard error and $p$-value are the same. Be careful interpreting these results: "In eliminating the period difference by subtracting the second estimate from the first we end up with an estimate of twice the difference between formoetrol and salbutamol.This can easily be adjusted by dividing the difference in means and its associated standard error by 2" (p. 46).
+
+If you do so, you get an estimated treatment effect of this:
+
+```{r}
+tidy(fit3.3, conf.int = TRUE) %>% 
+  filter(term == "seqnsalfor") %>% 
+  select(estimate, std.error, starts_with("conf.")) %>% 
+  mutate_all(.funs = ~ . / 2)
+```
+
+Note these results are similar to those from model `fit3.1` back in Section 3.2. Recall that was an intercept-only model of the `formoterol - salbutamol` difference score. Here's the summary of the ATE from that model, again.
+
+```{r}
+tidy(fit3.1, conf.int = TRUE)
+```
+
+Note the larger standard error for the earlier model, which didn't account for the systemic variation in `period`.
+
+## 3.6 Adjusting for a period effect: The Hills-Armitage approach
+
+At the top of page 48, we read the definition of *basic estimator*:
+
+> A basic estimator of a given treatment contrast is the given contrast calculated for an individual patient.
+
+We already computed the basic estimator contrasts (i.e., the cross-over differences) back in Table 3.2, the basics of which we reproduce again here:
+
+```{r}
+d %>% 
+  select(patient, seqn, treat, pef) %>% 
+  pivot_wider(names_from = treat, values_from = pef) %>% 
+  mutate(dif = formoterol - salbutamol)
+```
+
+From this basic-estimator perspective, "in the absence of any other knowledge either about period effects or treatment effects, and were we only able to study one patient, we should regard this cross-over difference as the best estimate of the treatment effect available to us" (p. 48).
+
+However, we know there are other factors at play, such as the period difference. Here's the mean of the person-specific cross-over differences, by `seqn`.
+
+```{r}
+# the first 4 lines are the same as above
+d %>% 
+  select(patient, seqn, treat, pef) %>% 
+  pivot_wider(names_from = treat, values_from = pef) %>% 
+  mutate(dif = formoterol - salbutamol) %>% 
+  # now we group and summarize
+  group_by(seqn) %>% 
+  summarise(mean_cross_over_difference = mean(dif))
+```
+
+You can compute those means with a model on the `dif` score with separate intercepts by the `seqn` variable, by way of the `y ~ 0 + ...` syntax.
+
+```{r}
+fit3.4 <- lm(
+  data = d %>% 
+    select(patient, seqn, treat, pef) %>% 
+    pivot_wider(names_from = treat, values_from = pef) %>% 
+    mutate(dif = formoterol - salbutamol),
+  dif ~ 0 + seqn
+) 
+
+summary(fit3.4)
+```
+
+Note our $\hat \sigma^2$ value matches the pooled estimate of $\sigma^2$ Senn reported at the top of page 49.
+
+```{r}
+sigma(fit3.4)^2
+```
+
+Anyway, if we'd like to compute the conditional means and their average, we might first practice computing the conditional means with the `predictions()` function. First we define our `nd` data grid, and then we compute.
+
+```{r}
+# define the data grid
+nd <- d %>% 
+  distinct(seqn)
+
+# compute
+predictions(fit3.4, newdata = nd)
+```
+
+We can get the average of those predictions with the `avg_predictions()` function.
+
+```{r}
+avg_predictions(fit3.4, newdata = nd) %>% 
+  data.frame() %>% 
+  mutate_all(.funs = ~ round(., digits = 3))
+```
+
+Note how that returned a standard error, and so on, which matched up with the values Senn reported at the top of page 49.
+
+Note how similar these results are to those from the  two-sample $t$-test analogue from the last section:
+
+```{r}
+tidy(fit3.3, conf.int = TRUE) %>% 
+  filter(term == "seqnsalfor") %>% 
+  select(estimate, std.error, starts_with("conf.")) %>% 
+  mutate_all(.funs = ~ . / 2)
+```
+
+From my perspective, the approach we took in this section with `fit3.4` was more natural, though. Following Freeman (1989), Senn referred to the approach in this section as the *CROS analysis*. Skimming through Freeman's paper, I believe *CROS* was a shorthand for *cross-over*, but it's a little hard to tell; Freeman could have done a better job spelling out his acronyms.
+
+But anyways, the crux of the CROS analysis is to:
+
+* compute participant-level difference scores by treatment (the *basic estimator*),
+* model the difference-scores conditional by phase, and then
+* compute an unweighted average of the phase-specific averages of the difference scores.
+
+Clearly, this is only going to work with Gaussian-like data.
+
+Before we move on, at the bottom of page 49, Senn reported another way to do this kind of analysis in Excel. The catch for this variant is he recoded the `seqn` variable so that those in the for-sal group were a 0.5, and those in the sal-for group were -0.5. With this parameterization, the intercept will be the unweighted average of the two groups, and the $\beta_1$ coefficient will the their contrast. Here's what that can look like with `lm()`.
+
+```{r}
+lm(
+  data = d %>% 
+    select(patient, seqn, treat, pef) %>% 
+    pivot_wider(names_from = treat, values_from = pef) %>% 
+    mutate(dif = formoterol - salbutamol,
+           # this is the new line
+           x_variable_1 = ifelse(seqn == "forsal", 0.5, -0.5)),
+  dif ~ 1 + x_variable_1
+) %>% 
+  summary()
+```
+
+You'll note this output reproduces the values Senn reported at the very bottom of page 49.
+
+## 3.7 Examining period effects*
+
+In addition to adjusting for period effects, as we just did in the last section, you might want to formally examine the period effects. One issue is that the effects in the second period are effected by carry-over, and it's even possible the magnitude of the carry-over differs by the interventions given in the previous phase. E.g., maybe formoterol has a stronger carry-over effect than its alternative.
+
+Here's how to use a separate-intercepts model to compute the means for the two periods.
+
+```{r}
+fit3.5 <- lm(
+  data = d %>% 
+    select(patient, seqn, pef, period) %>% 
+    pivot_wider(names_from = period, values_from = pef) %>% 
+    mutate(dif = `1` - `2`),
+  dif ~ 0 + seqn
+)
+
+summary(fit3.5)
+```
+
+It is indeed the case that the average of the two mean is about -16.
+
+```{r}
+coef(fit3.5) %>% 
+  sum() / 2
+```
+
+If you want a standard error for this, use the `avg_predictions()` method from the last section.
+
+```{r}
+# define the data grid (same as before)
+nd <- d %>% 
+  distinct(seqn)
+
+# compute
+avg_predictions(fit3.5, newdata = nd)
+```
+
+"The fact that the period effect is not significant, however, does not constitute a reason for not adjusting for it and therefor preferring the estimate for the treatment effect produced in Section 3.2 above that produced in Sections 3.5 and 3.6." Recall that the estimates in the later two sections had smaller standard errors, even if by only a little.
+
+## 3.8 Testing for carry-over and/or treatment by period interaction*
+
+At the top of the section, we read:
+
+> I wrote in the introductory chapter that I did not carry out tests for carry-over myself and did not advise the reader to do so. (p. 51)
+
+Thus, I'm not going to worry about this section.
+
+Next!
+
+## 3.9 A model for the AB/BA cross-over*
+
+I'm not going to use quotations here, but the section began with some definitions (p. 53):
+
+* $\pi$ the period effect: the expected secular difference between period 2 and period 1;
+* $\tau$ the treatment effect: the expected difference due to treatment between treatments A and B;
+* $\lambda_A$ a carry-over effect due to A;
+* $\lambda_B$ a carry-over effect due to B;
+* $\mu_i$ an 'effect' due to patient $i$: the response we should expect of patient $i$ were we to treat him in period 1 with B.
+
+## 3.10 Carry-over or treatment by period interaction?
+
+Recall that in the AB/BA cross-over design, carry-over effects and treatment-by-period interactions are not separably identifiable.
+
+## 3.11 Confidence intervals for carryover*
+
+Oh stop.
+
+## 3.12 Are unbiased estimators of the treatment effect available?*
+
+Yes, if you only use the data from the first period and analyze them the same you would with a typical post-only RCT. But this gives you a massive power hit, so just don't. As Senn closed this section: "There really is no point in carrying out a cross-over trial if we are only going to use the values from the first period" (p. 58).
+
+## 3.13 Can we adjust for carry-over?*
+
+At the top of the section, we read:
+
+> The answer is that to do so is both possible and useless. (p. 58)
+
+This results in the same answer (inflated SEs and all) as analyzing the data from the first period alone.
+
+## 3.14 The two-stage analysis*
+
+In the first paragraph, we read:
+
+> In a very imporant paper, Freeman (1989) carried out a thorough investigation of this approach and was able to show that this procedure was potentially misleading and unsatisfactory. The two-stage procedure is therefore of historical rather than scientific interest and can no longer be regarded as a serious option for analysis. (p. 58)
+
+## 3.15 Correcting the two-stage procedure*
+
+Senn recommended we don't do this.
+
+## 3.16 Use of baseline measurements
+
+> In the AB/BA cross-over trial, we may distinguish three kinds of baseline: those taken before the start of the first treatment, those taken after the completion of the first treatment and before the start of the second treatment and those taken after the second treatment. Strictly speaking only the first kind is a true baseline (Kenward and Jones, 1987a): there is always the possibility that due to carry-over the second or third kind may reflect the previous treatment (p. 62)
+
+From a behavior-analytic perspective, this is effectively an A1-B-A2-C-A3 design. In this sense, Senn is calling "baseline" what behavior analysts would call the A phase. I agree with Senn in that only the A1 phase is analogous to what you would traditionally think of as a "baseline" measurement.
+
+### 3.16.1 Two baselines
+
+Here's Table 3.8 as a data frame called `t3.8`.
+
+```{r}
+t3.8 <- d %>% 
+  select(patient, seqn, period, base) %>% 
+  pivot_wider(names_from = period, values_from = base) %>% 
+  mutate(cross_over_dif = ifelse(seqn == "forsal", `1` - `2`, `2` - `1`)) %>% 
+  arrange(seqn, patient) %>% 
+  bind_cols(d %>% 
+              select(patient, seqn, treat, pef) %>% 
+              pivot_wider(names_from = treat, values_from = pef) %>% 
+              mutate(basic_estimators_for_8_hours = formoterol - salbutamol) %>% 
+              arrange(seqn, patient) %>% 
+              select(basic_estimators_for_8_hours))
+
+# what?
+print(t3.8)
+```
+
+"If the cross-over differences for the baselines in Table 3.8 are compared to the basic estimators there appears to be a correlation between the two" (p. 63). We can see this clearly in our version of Figure 3.4.
+
+```{r, warning = F}
+t3.8 %>% 
+  ggplot(aes(x = cross_over_dif, y = basic_estimators_for_8_hours)) +
+  stat_smooth(method = "lm", se = F, formula = 'y ~ x', fullrange = T) +
+  geom_point(aes(shape = seqn)) +
+  xlim(-200, 200) +
+  ylim(-200, 200)
+```
+
+> This may be because there is a general trend effect affecting both baselines and outcomes. If we saw a period effect on outcomes we should then see a similar period on baselines. Even if we compare within sequence groups, however, it still seems to be the case that higher cross-over differences for baselines is associated with a higher value of the baseline estimator. One possible explanation is that patients are subject to individual trend effects over the whole experiment (some are deteriorating whereas others are improving). Were this to be the case the baselines would contain useful information. (p. 64)
+
+"One simple way of using the information, which is appropriate if the baselines are believed to be strongly predictive of outcome, is simply to *adjust the basic estimators by subtracting the cross-over differences for the baselines*" (p. 64, *emphasis* added).
+
+Here's what happens if I do that with sample statistics.
+
+```{r}
+# compute
+t3.8 <- t3.8 %>% 
+  mutate(corrected_dif = basic_estimators_for_8_hours - cross_over_dif) 
+
+# take the mean
+t3.8 %>% 
+  summarise(m = mean(corrected_dif))
+```
+
+The results are the same if I fit an intercept-only model of that `corrected_dif` value.
+
+```{r}
+fit3.6 <- lm(
+  data = t3.8,
+  corrected_dif ~ 1)
+
+summary(fit3.6)
+```
+
+These results aren't exactly the same as those Senn reported toward the bottom of page 64, where he wrote: The reader may check for himself that if the baselines are used in this way the resulting treatment estimate is 39.1 l/min with an estimated standard error of 8.4 l/min." I don't know where the discrepancy is coming from.
+
+However, Senn proposed a better approach. Just control for baselines using an ANCOVA.
+
+
+Here's the simple linear model.
+
+```{r}
+fit3.7 <- lm(
+  data = t3.8, 
+  basic_estimators_for_8_hours ~ cross_over_dif)
+
+summary(fit3.7)
+```
+
+These results match the focal estimates Senn reported at the bottom of his Table 3.9 (p. 65). Our $\hat \tau = 39.0$ and its standard error is 9.27.
+
+Here, then is how to compute the bulk of the rest of Table 3.9.
+
+```{r}
+t3.8 %>% 
+  select(contains("_")) %>% 
+  mutate(product = cross_over_dif * basic_estimators_for_8_hours) %>% 
+  mutate(p = basic_estimators_for_8_hours - coef(fit3.7)[2] * cross_over_dif)
+```
+
+### 3.16.2 Case 2: measurements before first treatment only.
+
+In this case, you can not use the `corrected_dif = basic_estimators_for_8_hours - cross_over_dif` method we discussed, before. But you can use the single baseline measure like a time-invariant background covariate in an ANCOVA.
+
+### 3.16.3 Case 3: measurements after first and second treatments.
+
+From a behavior-analytic perspective, this is effectively a B-A1-C-A1 design, which is an unusual strategy.
+
+As Senn wrote in the second paragraph, "interpretation will be extremely difficult" (p. 68) if you try to use this to formally test of carry-over effects.
+
+## 3.17 A Bayesian approach*
+
+Here Senn discussed a Bayesian approach to the two-step procedure, which I didn't find of interest.
+
+## 3.18 Computer analysis
+
+FFS, about time.
+
+### 3.18.1 Fixed effects analysis of original data.
+
+Here's the data for `patient == "4"` at `period == "2"`, as displayed in the middle of page 74.
+
+```{r}
+d %>% 
+  filter(patient == "4" & period == "2")
+```
+
+I believe this is how to run the equivalent of the initial analysis starting at the end of page 73 and ending at the top of page 74, what you might call a "fixed effects" analysis, where each `patient` gets their own intercept, and `patient == 1` is the reference to which all others are parameterized as deviations.
+
+```{r}
+fit3.8 <- lm(
+  data = d,
+  pef ~ treat + patient
+)
+
+summary(fit3.8)
+```
+
+The focal parameter in this model, $\beta_1$, is the same $\beta_0$ from our intercept-only $t$-test analogue `fit3.1`. Here's a closer look at the two.
+
+```{r}
+bind_rows(
+  tidy(fit3.8, conf.int = TRUE) %>% 
+    filter(term == "treatformoterol"),
+  tidy(fit3.1, conf.int = TRUE)) %>% 
+  mutate(model = str_c("fit3.", c(8, 1))) %>% 
+  select(model, estimate:conf.high)
+```
+
+And both of these parameters, recall, are the ATE for formoterol compared to salbutamol.
+
+Here is the second fixed-effects model, which adds the covariates `base` and `period`.
+
+```{r}
+fit3.9 <- lm(
+  data = d,
+  pef ~ treat + patient + base + period
+)
+
+summary(fit3.9)
+```
+
+I believe $\beta_1$ in this model is the ATE, controlling for the A1 and A2 baseline measurements, and accounting for variance attributed to `period`. With this parameterization, the ATE is expressed in terms of the first period.
+
+We might compute the 95% CI's for the second model with the `confint()` function.
+
+```{r}
+confint(fit3.9)
+```
+
+### 3.18.2 Random effects analysis of original data.
+
+We'll need **lme4** for this section.
+
+Here's the multilevel model with the covariates. Note that whereas in the text Senn is using a variable called *GROUP* to indicate the treatment sequence (see page 73), we have the variable `seqn` instead.
+
+```{r}
+fit3.10 <- lmer(
+  data = d,
+  pef ~ treat + seqn + period + (1 | patient)
+)
+
+summary(fit3.10)
+```
+
+I'm not aware of a quick way to make a "test of fixed effects" summary like the one Senn reported at the bottom of page 75, but frankly I don't know that I'd want one. We can, however, use the `anova()` function to return a summary table similar to the one he presented at the top of page 76.
+
+```{r}
+anova(fit3.10)
+```
+
+A big advantage of the multilevel approach is it handles missing data with FIML, whereas you'd generally have to use multiple imputation to handle missing data with the fixed-effects approach.
+
+### 3.18.3 Recovering degrees of freedom for error from baselines.
+
+For the next model, we need a new version of the data set where we have combined the two `pef` and `base` variables into a single `outcome` variable, and we have dropped the rows for `base` for which `period == 2`. We also adjust the `period` variable so it now ranges from `0` to `2`, and adjust the `treat` variable so it now equals `baseline` for when `period == 0`. Thus each participant now has 3 rows. We call the data set `d3`, for the 3 rows per participant.
+
+```{r}
+d3 <- d %>% 
+  mutate(base = ifelse(period == 2, NA, base),
+         period = as.double(period),
+         treat = as.character(treat)) %>% 
+  pivot_longer(pef:base, values_to = "outcome") %>% 
+  drop_na(outcome) %>% 
+  mutate(period = ifelse(name == "base", 0, period)) %>% 
+  mutate(period = factor(period, levels = 0:2),
+         treat = ifelse(name == "base", "baseline", treat) %>% 
+           factor(levels = c("baseline", "salbutamol", "formoterol"))) %>% 
+  arrange(patient, period) %>% 
+  mutate(treat.n = case_when(
+    treat == "salbutamol" ~ -1,
+    treat == "baseline"   ~  0,
+    treat == "formoterol" ~  1
+  )) %>% 
+  select(-name)
+
+# what?
+head(d3)
+```
+
+These adjustments all follow the details in the second paragraph of this section (p. 77). Note we also have a numeric version of the `treat` factor called `treat.n`, coded on the way Senn described.
+
+At the bottom of page 77, Senn then fit a fixed-effects model which I believe corresponds to this.
+
+```{r}
+fit3.11 <- lm(
+  data = d3,
+  outcome ~ patient + period + treat.n)
+
+summary(fit3.11)
+```
+
+The primary parameter is for `treat.n`, which we focus on here.
+
+```{r}
+tidy(fit3.11) %>% 
+  filter(term == "treat.n")
+```
+
+Note because of the -1, 0, 1 coding of the variable, the average difference between `salbutamol` and `formoterol` is twice this value.
+
+If we use the `predictions()` function along with the `datagrid()` function, it's easy to compute the average `outcome` values for the two treatments.
+
+```{r}
+predictions(fit3.11, newdata = datagrid(treat.n = c(-1, 1)))
+```
+
+We can get their formal contrast by adding `hypothesis = "revpairwise"`.
+
+```{r}
+predictions(fit3.11, 
+            newdata = datagrid(treat.n = c(-1, 1)),
+            hypothesis = "revpairwise")
+```
+
+You'll note that value is twice the point estimate for `treat.n` from the model, but now with the appropriately adjusted standard error, and so on.
+
+Anyway, at the top of page 78, Senn remarked: "An equivalent analysis using *proc mixed* is possible" (*emphasis* in the original). Here's what that looks like with `lmer()`.
+
+```{r}
+fit3.12 <- lmer(
+  data = d3,
+  outcome ~ period + treat.n + (1 | patient))
+
+summary(fit3.12)
+```
+
+Here's a comparison of the point estimate and standard error of the $\beta$ coefficient for `treat.n` from the two versions of the model.
+
+```{r}
+bind_rows(
+  tidy(fit3.11) %>% filter(term == "treat.n") %>% select(estimate:std.error),
+  tidy(fit3.12) %>% filter(term == "treat.n") %>% select(estimate:std.error)
+) %>% 
+  mutate(model = c("fixed effects", "multilevel"))
+```
+
+They're the same.
+
+In the second paragraph on page 78, Senn commented on the estimated error variance. Here's that value for the fixed-effects version of the model.
+
+```{r}
+# squaring converts to the sigma-squared (i.e., variance) metric
+sigma(fit3.11)^2
+```
+
+It matches with the value reported in the text.
+
+It might not be immediately obvious, but Senn then compared the $\hat \sigma^2$ value from this model to the $\hat \sigma_\epsilon^2$ value from `fit3.10` from the last section (3.18.2). Here's that value (which also matches the value he reported in the text):
+
+```{r}
+sigma(fit3.10)^2
+```
+
+Senn then compared the ratio of the standard error (in the variance metric) for the focal contrast to the residual variance in both those models, and remarked they were the same. It's ugly, but here's how that looks in code.
+
+```{r}
+# fit3.10 from last section
+vcov(fit3.10)["treatformoterol", "treatformoterol"] / sigma(fit3.10)^2
+# fit3.11 from this section
+(sqrt(vcov(fit3.11)["treat.n", "treat.n"]) * 2)^2 / sigma(fit3.11)^2
+```
+
+Yep, they're the same.
+
+Senn then closed the section remarking he preferred the earlier model `fit3.10`, which did not use the first baseline values as outcomes.
+
+### 13.8.4 Basic estimator analysis using `proc glm`.
+
+As Senn clarified in the first couple paragraphs of this section (pp. 78--79), the analyses in this section require a new version of the data set where each level of `patient` only has one row in the data. Several of our analyses earlier in this script did that on the fly within the `lm()` function. Here we'll actually make a new data set. We have already saved some of the necessary computational steps in the object called `t3.8` from when we recreated the output from Table 3.8. Here we add to that work, and save the results as `d2`.
+
+```{r}
+d2 <- t3.8 %>% 
+  rename(basicest = basic_estimators_for_8_hours,
+         basedif = cross_over_dif) %>% 
+  select(patient, basicest, basedif) %>% 
+  # add most background variables
+  left_join(
+    d %>% 
+      filter(period == 1) %>% 
+      rename(base1 = base) %>% 
+      select(patient, sex, seqn, base1),
+    by = join_by(patient)) %>% 
+  select(patient, basicest, sex, seqn, base1, basedif) %>% 
+  arrange(patient)
+
+# what?
+head(d2)
+```
+
+Here, `basicest` is the basic estimator for each level of `patient`, and it was computed by subtracting the `pef` value collected under salbutamol from the `pef` value collected under formoterol.
+
+Here is the information for `patient == "4"`, as seen on the top of page 79.
+
+```{r}
+d2 %>% 
+  filter(patient == "4")
+```
+
+Senn wanted this version of the data to fit "the basic estimator for each patient" (p. 78), the `proc glm` code for which he produced in the middle of page 79. Sadly, my ability to reproduce the results from that model will be limited, here. Senn didn't explicitly report the results from that model, and I am not a SAS user. Based on my rudimentary understanding of Senn's SAS code and his remark "an analysis corresponding to that i[n] Section 3.6 will be reproduced" (p. 79), I believe our version of the model would be this:
+
+```{r}
+fit3.13 <- lm(
+  data = d2,
+  basicest ~ 1 + seqn)
+
+summary(fit3.13)
+```
+
+In this model, $\beta_0$ is the formoterol-minus-salbutamol contrast for those in the for-sal group, and $\beta_1$ is the difference in that contrast for those in the sal-for group. With this parameterization, it'll be easiest for us to compute the ATE across groups with the `avg_predictions()` approach from above.
+
+```{r}
+# define the data grid
+nd <- d2 %>% 
+  distinct(seqn)
+
+# compute the group specific ATEs
+predictions(fit3.13, newdata = nd)
+
+# compute the unweighted average of the group specific ATEs
+avg_predictions(fit3.13, newdata = nd) %>% 
+  data.frame() %>% 
+  mutate_all(.funs = ~ round(., digits = 4))
+```
+
+These results do indeed match those from our version of Section 3.6 (`fit3.4`).
+
+```{r}
+avg_predictions(fit3.4, 
+                newdata = nd) %>% 
+  data.frame() %>% 
+  mutate_all(.funs = ~ round(., digits = 3))
+```
+
+I believe this is our equivalent of Senn's `proc glm` sex-treatment interaction model from the bottom of page 79.
+
+```{r}
+fit3.14 <- lm(
+  data = d2,
+  basicest ~ 1 + sex) 
+
+summary(fit3.14)
+```
+
+Our $\beta_0$ is the formoterol-minus-salbutamol contrast for those who identified as `female`, and $\beta_1$ is the difference in that contrast for those who identified as `male`. Whereas our $\beta_1$ summary matches up with the second row of Senns output table at the top of page 80, we'll want to use the `avg_predictions()` approach to compute the top row of his table.
+
+```{r}
+# define the data grid
+nd <- d2 %>% 
+  distinct(sex)
+
+# compute the group specific ATEs
+predictions(fit3.14, newdata = nd)
+
+# compute the unweighted average of the group specific ATEs
+avg_predictions(fit3.14, 
+                newdata = nd, 
+                # default is Inf (for asymptotic inference)
+                df = insight::get_df(fit3.13)) %>% 
+  data.frame() %>% 
+  mutate_all(.funs = ~ round(., digits = 3))
+```
+
+Note our use of the `df` argument within `avg_predictions()`. By default, the degrees of freedom are set to infinity, which returns asymptotic (i.e., Wald) results. If you want your $p$-values based on a $t$-distribution instead, you can use `df`. Senn tends to use the $t$-distribution in his summaries.
+
+Though not covered in the text, we can actually parameterize our model so the two $\beta$ coefficients correspond directly to the estimands Senn reported at the top of page 80. The trick is to recode `sex` so the values of `male` and `femal` take on the numeric values of -0.5 and 0.5, respectively. Here we'll call that version of the model `fit3.14b`.
+
+```{r}
+fit3.14b <- lm(
+  data = d2 %>% 
+    mutate(sex = ifelse(sex == "female", 0.5, -0.5)),
+  basicest ~ 1 + sex) 
+
+summary(fit3.14b)
+```
+
+Pretty sweet, eh?
+
+Anyway, in the second half of page 80, Senn remarked the standard error for the average of the two `sex`-level contrasts (12.675...) is "simply half that of the sex by treatment interaction," which is our $\beta_1$ coefficient from `fit3.14`. Here's the proof that when we divide that standard error in half, it is indeed 12.675...
+
+```{r}
+vcov(fit3.14)["sexmale", "sexmale"] %>% sqrt() / 2
+```
+
+Senn then cautioned against focusing on treatment interaction effects of this kind, and I generally agree. If your study is designed to produce an ATE, beware of focusing on a CATE.
+
+Senn then remarked "Fitting first period baselines in a model is also an example of fitting an interactive effect" (p. 81). Here's our `lm()` model equivalent of his SAS model that included `seqn` and `base1` as covariates.
+
+```{r}
+fit3.15 <- lm(
+  data = d2,
+  basicest ~ 1 + seqn + base1)
+
+summary(fit3.15)
+```
+
+Here's the ANOVA table.
+
+```{r}
+anova(fit3.15)
+```
+
+Based on that second $p$-value, Senn concluded: "There is no evidence of significant treatment by baseline interaction" (p. 81). Just a little earlier on the same page, he reported: "The thorny question of estimating the treatment effect for this model will not be addressed." Sad. I believe we can use the standardization/g-computation approach with a very simple line of `avg_predictions()`.
+
+```{r}
+avg_predictions(fit3.15)
+```
+
+You'll note that the point estimate is very similar to those from other models, above. Though the standard error is a bit larger than the one from `fit3.13`, it's a bit smaller than the one from `fit3.14`.
+
+## 3.19 Further reading
+
+Senn listed a lot of good-looking references, here.
+
+## 3.20 Recommendations
+
+Lot's of solid recommendations, here.
+
+## Session info
+
+```{r}
+sessionInfo()
+```
+
