@@ -1,0 +1,131 @@
+---
+title: "07: Some special designs"
+author: "A Solomon Kurz"
+date: "`r format(Sys.Date())`"
+output:
+  github_document
+always_allow_html: true 
+---
+
+Load the packages.
+
+```{r, warning = F, message = F}
+library(tidyverse)
+library(marginaleffects)
+```
+
+## 7.4 $n$ of 1 trials
+
+### 7.4.1 Why undertake $n$ of 1 trials?
+
+Senn introduced an example from Guyatt et al (1990; [https://doi.org/10.1016/0197-2456(90)90003-K](https://doi.org/10.1016/0197-2456(90)90003-K)). The data are not technically available in a data set, but as is often the case among BA researchers, Guyatt et al displayed their primary data in a figure (Figure 1, p. 92). Here's an approximation of those data.
+
+```{r}
+guyatt <- tibble(pair = rep(1:3, each = 4 * 2) %>% factor(),
+       time = rep(1:8, times = 3),
+       tx = rep(c(1:0, 1:0, 0:1), each = 4) %>% factor(),
+       score = c(4.4, 4.9, 4.8, 4.8,
+                 4.4, 4, 4.1, 4.2,
+                 4.5, 4.9, 5.4, 5.4,
+                 3.9, 4.1, 4.3, 4.2,
+                 3.7, 4.2, 4.4, 4.4, 
+                 4.2, 5, 5.5, 5.5)) 
+
+# what?
+head(guyatt)
+```
+
+Here's a version of Guyatt et al's Figure 1 (p. 92 in the original article).
+
+```{r}
+guyatt %>% 
+  mutate(tx = factor(tx)) %>% 
+  
+  ggplot(aes(x = time, y = score, color = tx)) +
+  geom_point(size = 3) +
+  scale_color_viridis_d(option = "A", end = .7) +
+  ylim(2.2, 5.9) +
+  facet_wrap(~ pair, labeller = label_both, nrow = 1)
+```
+
+Here's the sample statistics, by `pair` and `tx`.
+
+```{r}
+guyatt %>% 
+  group_by(pair, tx) %>% 
+  summarise(m = mean(score),
+            s = sd(score))
+```
+
+If we ignore temporal trends and just treat the data as Gaussian, here's how we might fit a simple model.
+
+```{r}
+fit7.1 <- lm(
+  data = guyatt,
+  score ~ 1 + tx + pair + tx : pair
+)
+
+summary(fit7.1)
+```
+
+Here are the group means.
+
+```{r}
+nd <- guyatt %>% 
+  distinct(tx, pair)
+
+predictions(fit7.1, newdata = nd)
+```
+
+We might get a sense of what those look like with a plot.
+
+```{r}
+predictions(fit7.1, newdata = guyatt) %>% 
+  data.frame() %>% 
+  
+  ggplot(aes(x = time)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = tx),
+              alpha = 1/4) +
+  geom_line(aes(y = estimate, color = tx)) +
+  geom_point(aes(y = score, color = tx)) +
+  scale_fill_viridis_d(option = "A", end = .7) +
+  scale_color_viridis_d(option = "A", end = .7) +
+  coord_cartesian(xlim = c(1, 8),
+                  ylim = c(2.2, 5.9)) +
+  facet_wrap(~ pair, labeller = label_both, nrow = 1)
+```
+
+Now we compute the `tx` contrasts, by `pair`.
+
+```{r}
+nd <- tibble(pair = factor(1:3))
+
+comparisons(fit7.1, newdata = nd, variables = list(tx = "pairwise"))
+```
+
+Here's the average across the `pair`-specific contrasts.
+
+```{r}
+avg_comparisons(fit7.1, 
+                newdata = nd, 
+                variables = list(tx = "pairwise"),
+                # for t-distribution based inference and CIs
+                df = insight::get_df(fit7.1))
+```
+
+Our $t$-statistic, point estimate, and standard error are all very close to those Senn reported at the top of page 229.
+
+### 7.4.3 General discussion.
+
+> The analysis of a single $n$ of 1 trial does not require any methodology not already available for the analysis of single centre parallel group trial. This is because the episodes of treatment of the patient may be regarded as replicate observations of the patient in the same way as the patients in the single-centre trial may be used as replicate observations on that centre. (p. 230)
+
+## 7.5 Bioequivalence studies
+
+
+
+## Session info
+
+```{r}
+sessionInfo()
+```
+
