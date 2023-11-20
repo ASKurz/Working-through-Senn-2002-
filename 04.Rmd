@@ -1,0 +1,1244 @@
+---
+title: '04: Other outcomes and the AB/BA design'
+author: "A Solomon Kurz"
+date: "`r format(Sys.Date())`"
+output:
+  github_document
+always_allow_html: true  
+---
+
+```{r, echo = F, cache = F}
+knitr::opts_chunk$set(fig.retina = 2.5)
+knitr::opts_chunk$set(fig.align = "center")
+options(width = 120)
+```
+
+We can find code for this chapter from [http://www.senns.uk/CTiCR/CTICR2Programs.htm#R](http://www.senns.uk/CTiCR/CTICR2Programs.htm#R).
+
+Here we load our packages and the PEF data from back in Chapter 3.
+
+```{r, warning = F, message = F}
+# load packages
+library(tidyverse)
+library(flextable)
+library(ordinal)
+library(broom)
+library(marginaleffects)
+library(lme4)
+library(broom.mixed)
+
+# Input data
+n1 <- 7 # number of patients first sequence
+n2 <- 6 # number of patients second sequence
+n <- n1 + n2
+
+seqn <- factor((c(rep(1, n1), rep(2, n2), rep(1, n1), rep(2, n2))),
+               labels = c("forsal", "salfor")) # sequences
+
+patient <- factor(rep(c("1", "4", "6", "7", "10", "11", "14", "2", "3", "5", "9", "12", "13"), 2),
+                  levels = 1:14) 
+
+# not in the original code, but here is sex
+sex <- c("male", "female", "female", "male", "male", "female", "male", "male", "male", "female", "male", "male", "male")
+
+period <- factor(c(rep("1", n), rep("2", n)))
+
+treat <- factor(c(rep(2, n1), rep(1, n2), rep(1, n1), rep(2, n2)),
+                labels = c("salbutamol", "formoterol"))
+
+#Note: "formoterol" is coded second level of factor
+pef <- c(310, 310, 370, 410, 250, 380, 330, 370, 310, 380, 290, 260, 90, 270, 260, 300, 390, 210, 350, 365, 385, 400, 410, 320, 340, 220)
+base <- c(290, 300, 250, 390, 250, 365, 190, 350, 350, 350, 280, 270, 220, 270, 270, 210, 390, 240, 380, 260, 345, 370, 360, 290, 310, 220)
+
+d <- tibble(
+  seqn = seqn,
+  patient = patient,
+  period = period,
+  treat = treat,
+  pef = pef,
+  base = base
+) %>% 
+  arrange(period, as.double(as.character(patient))) %>% 
+  mutate(sex = c(sex, sex))
+
+# what?
+head(d)
+```
+
+## 4.1 Introduction
+
+For simplicity, I'm going to omit quotation marks and rearrange the foratting, but this section began in part with the following:
+
+Techniques for dealing with non-Normal outcomes will be considrere under six major headings:
+
+* transformations,
+* non-parametric methods,
+* methods for binary outcomes,
+* methods for ordered categorical data,
+* analysis of frequency data, and
+* survival analysis.
+
+## 4.2 Transformations
+
+Log transformations can make it easier to express the treatment effects as multiplicative.
+
+### 4.2.1 Logarithmic transformations.
+
+Here's a way to make our version of Table 4.1. You'll note it's a minor extension of the code used to make our version of Table 3.2 from back in Section 3.2.
+
+```{r}
+d %>% 
+  mutate(sequence = ifelse(seqn == "forsal", "for/sal", "sal/for"),
+         patient = as.double(patient),
+         # log transform the outcome variable
+         pef = log(pef)) %>%
+  select(sequence, patient, treat, pef) %>%
+  pivot_wider(names_from = treat, values_from = pef) %>% 
+  mutate(difference = round(formoterol - salbutamol, digits = 3),
+         # note this is a ratio of pef in its natural metric
+         ratio = round(exp(formoterol) / exp(salbutamol), digits = 4)) %>% 
+  mutate_at(.vars = vars(formoterol:salbutamol), 
+            .funs = ~ round(., digits = 4)) %>% 
+  arrange(sequence, patient) %>% 
+  as_grouped_data(groups = c("sequence")) %>% 
+  flextable() %>% 
+  padding(padding.top = 2, padding.bottom = 2, part = "all")
+```
+
+Let's go ahead and save the log-transformed version of `pef` in the data frame as `lpef`.
+
+```{r}
+d <- d %>% 
+  mutate(lpef = log(pef))
+
+# what?
+head(d)
+```
+
+Now we can get ready to do a CROS analysis of these data by first computing the participant-level difference scores of the log-transformed outcome by treatment (the *basic estimator*), and modeling the difference-scores conditional by phase. Here as in Section 3.6, we'll do so by way of the `y ~ 0 + ...` syntax.
+
+```{r}
+fit4.1 <- lm(
+  data = d %>% 
+    select(patient, seqn, treat, lpef) %>% 
+    pivot_wider(names_from = treat, values_from = lpef) %>% 
+    mutate(dif = formoterol - salbutamol),
+  dif ~ 0 + seqn
+) 
+
+summary(fit4.1)
+```
+
+Now here's the final step of the CROS analysis where we compute the unweighted average of the phase-specific averages of the difference scores.
+
+```{r}
+# define the data grid
+nd <- d %>% 
+  distinct(seqn)
+
+# compute the phase-specific contrasts (intermediate step)
+predictions(fit4.1, newdata = nd)
+
+# compute the unweighted average of the phase-specific contrasts 
+avg_predictions(fit4.1, newdata = nd) %>% 
+  data.frame() %>% 
+  mutate_all(.funs = ~ round(., digits = 3))
+```
+
+This results matches the value Senn reported at the bottom of page 90.
+
+Senn recommended anti-logging the estimate (i.e., exponentiating), which transforms it to a ratio. Here's how we might do that with our `avg_predictions()`-based workflow.
+
+```{r}
+avg_predictions(fit4.1, 
+                newdata = nd, 
+                # for t-distribution based inference and CIs
+                df = insight::get_df(fit4.1)) %>% 
+  data.frame() %>% 
+  select(estimate, contains("conf.")) %>% 
+  mutate_all(.funs = ~ exp(.) %>% round(digits = 3))
+```
+
+This can be interpreted as formoterol increased `pef` values by about 21%, relative to salbutamol. But when we mind the 95% CIs, we note this increase might well be as low as 5%, or as high as 39%.
+
+Senn then remarked: We could have achieved this estimate directly by calculating a basic estimator for each patient in terms of ratios of PEF [as in Table 4.1]... The fact that we have taken ratios, however, implies that we need to take a geometric mean rather than the more usual arithmetic mean" (p. 91). I'm not aware of a geometric mean function within **R**, but I believe you can do so with a combination of `log()`, `mean()`, and `exp()`. Here are the sequence-specific geometric means.
+
+```{r}
+d %>% 
+  mutate(sequence = ifelse(seqn == "forsal", "for/sal", "sal/for"),
+         patient = as.double(patient)) %>%
+  select(sequence, patient, treat, pef) %>%
+  pivot_wider(names_from = treat, values_from = pef) %>% 
+  mutate(ratio = formoterol / salbutamol) %>% 
+  group_by(sequence) %>% 
+  summarise(gm = log(ratio) %>% mean() %>% exp())
+```
+
+Here's the mean of those geometric means.
+
+```{r}
+d %>% 
+  mutate(sequence = ifelse(seqn == "forsal", "for/sal", "sal/for"),
+         patient = as.double(patient)) %>%
+  select(sequence, patient, treat, pef) %>%
+  pivot_wider(names_from = treat, values_from = pef) %>% 
+  mutate(ratio = formoterol / salbutamol) %>% 
+  group_by(sequence) %>% 
+  summarise(gm = log(ratio) %>% mean() %>% exp()) %>% 
+  summarise(mean_gm = mean(gm))
+```
+
+I'm not aware of a great way to do this within a frequentist GLM framework. We can get close, though. Here's how to fit the initial model of for the basic estimator for each patient in terms of ratios for `pef`.
+
+```{r}
+fit4.2 <- lm(
+  data = d %>% 
+    select(patient, seqn, treat, pef) %>% 
+    pivot_wider(names_from = treat, values_from = pef) %>% 
+    mutate(ratio = formoterol / salbutamol),
+  log(ratio) ~ 0 + seqn
+) 
+
+summary(fit4.2)
+```
+
+We can then use `transform = exp` within `predictions()` to get the `seqn` specific results.
+
+```{r}
+predictions(fit4.2, newdata = nd, transform = exp) %>% 
+  data.frame()
+```
+
+A single `summarise()` will return the mean of those point estimates, which is the same as the mean of the geometric means we computed by hand, above.
+
+```{r}
+predictions(fit4.2, 
+            newdata = nd, 
+            transform = exp) %>% 
+  data.frame() %>% 
+  summarise(estimate = mean(estimate),
+            conf.low = mean(conf.low),
+            conf.high = mean(conf.high))
+```
+
+However, I'm not aware of a good way to get the correct standard error for this within a frequentist framework. The naive application of `avg_predictions()` for this doesn't work, for example.
+
+```{r}
+avg_predictions(fit4.2, newdata = nd, transform = exp) %>% 
+  data.frame()
+```
+
+So it goes...
+
+Senn then discussed how this log-transform method can be sensitive to unusual cases. For example, here's what happens when you repeat the analysis for our `fit4.1`, but drop `patient == 13`.
+
+```{r}
+fit4.3 <- lm(
+  data = d %>% 
+    filter(patient != 13) %>% 
+    select(patient, seqn, treat, lpef) %>% 
+    pivot_wider(names_from = treat, values_from = lpef) %>% 
+    mutate(dif = formoterol - salbutamol),
+  dif ~ 0 + seqn
+) 
+
+# summary(fit4.3)
+
+# compute the unweighted average of the phase-specific contrasts 
+avg_predictions(fit4.3, newdata = nd) %>% 
+  data.frame() %>% 
+  mutate_all(.funs = ~ round(., digits = 4))
+```
+
+The estimate dropped form 0.188 to 0.126. However, the standard error is much lower, even with one fewer case. It's about half the size of the SE from the first model with all cases.
+
+```{r}
+avg_predictions(fit4.1, newdata = nd) %>% 
+  data.frame() %>% 
+  mutate_all(.funs = ~ round(., digits = 4))
+```
+
+### 4.2.2 The logit transformation.
+
+Here's what the logit transform looks like for VAS values ranging from 0 to 100.
+
+```{r}
+tibble(vas = 0:100) %>% 
+  mutate(logit_score = log(vas / (100 - vas))) %>% 
+  
+  ggplot(aes(x = vas, y = logit_score)) +
+  geom_point() +
+  coord_cartesian(ylim = c(-5, 5))
+```
+
+We do this all the time with logistic regression models for binomial data.
+
+You might assume you could find the basic code for the Example 4.1 data, in the Example 4.1 section of [http://www.senns.uk/CTiCR/CTICR2Programs.htm#R](http://www.senns.uk/CTiCR/CTICR2Programs.htm#R). Frustratingly, that doesn't appear to be the case. We can, however, recreate the basics from Table 4.2 on page 93. Here we put the primary values into a tribble called `d2.`
+
+```{r}
+d2 <- tribble(
+  ~patient, ~seqn, ~formoterol, ~salbutamol,
+  1,	"forsal",	63,	82,
+  3,	"forsal",	24,	84,
+  5,	"forsal",	32,	66,
+  6,	"forsal",	33,	51,
+  10,	"forsal",	24,	75,
+  12,	"forsal",	30,	38,
+  2,	"salfor",	40,	68,
+  4,	"salfor",	5,	4,
+  7,	"salfor",	21,	57,
+  8,	"salfor",	5,	23,
+  9,	"salfor",	32,	56,
+  11,	"salfor",	4,	53
+) %>% 
+  mutate(patient = factor(patient, levels = 1:14),
+         seqn = factor(seqn, levels = c("forsal", "salfor"))) %>% 
+  pivot_longer(formoterol:salbutamol, names_to = "treat", values_to = "vas") %>% 
+  mutate(period = case_when(
+    seqn == "forsal" & treat == "formoterol" ~ 1,
+    seqn == "forsal" & treat == "salbutamol" ~ 2,
+    seqn == "salfor" & treat == "formoterol" ~ 2,
+    seqn == "salfor" & treat == "salbutamol" ~ 1
+  ) %>% 
+    factor(levels = 1:2)
+  ) %>% 
+  select(seqn, patient, period, treat, vas) %>% 
+  arrange(period, patient)
+
+# what?
+head(d2)
+```
+
+Here's our version of Table 4.2 (p. 93).
+
+```{r}
+d2 %>% 
+  mutate(sequence = ifelse(seqn == "forsal", "for/sal", "sal/for"),
+         patient = as.double(patient)) %>% 
+  select(sequence, patient, treat, vas) %>%
+  pivot_wider(names_from = treat, values_from = vas) %>% 
+  mutate(basic_estimator = formoterol - salbutamol) %>% 
+  arrange(sequence, patient) %>% 
+  as_grouped_data(groups = c("sequence")) %>% 
+  flextable() %>% 
+  padding(padding.top = 2, padding.bottom = 2, part = "all")
+```
+
+Here's a version of Senn's depiction of the data in his Figure 4.1 (p. 94).
+
+```{r}
+d2 %>% 
+  mutate(sequence = ifelse(seqn == "forsal", "for/sal", "sal/for")) %>% 
+  
+  ggplot(aes(x = patient, y = vas)) +
+  geom_point(aes(shape = treat)) +
+  scale_shape_manual(values = c(0, 4)) +
+  scale_y_continuous("VAS (mm)", limits = c(0, 100)) +
+  labs(caption = expression(italic(Note)*'. For the VAS, 0 = "good", 100 = "bad"')) +
+  facet_wrap(~ sequence) +
+  theme(panel.grid = element_blank())
+```
+
+Based on the scaling of the VAS, it looks like folks preferred formoterol to salbutamol by a lot.
+
+Here's our version of the standard Gaussian CROS analysis model for the VAS scores.
+
+```{r}
+fit4.4 <- lm(
+  data = d2 %>% 
+    select(patient, seqn, treat, vas) %>% 
+    pivot_wider(names_from = treat, values_from = vas) %>% 
+    mutate(dif = formoterol - salbutamol),
+  dif ~ 0 + seqn
+) 
+
+summary(fit4.4)
+```
+
+Here's the focal contrast.
+
+```{r}
+avg_predictions(fit4.4, 
+                newdata = nd,
+                # for t-distribution based inference and CIs
+                df = insight::get_df(fit4.4)) %>% 
+  data.frame() %>% 
+  mutate_all(.funs = ~ round(., digits = 2))
+```
+
+Averaging over the two levels of `seqn`, formoterol was rated about 29 VAS points lower than salbutamol, which seems pretty large, to me.
+
+Before we fit the next model, let's add a `logit_score` version of the `vas` variable.
+
+```{r}
+d2 <- d2 %>% 
+  mutate(logit_score = log(vas / (100 - vas)))
+
+# what?
+d2 %>% 
+  select(vas, logit_score) %>% 
+  head()
+```
+
+Here's the Gaussian CROS analysis model for the logit-score version of the VAS scores.
+
+```{r}
+fit4.5 <- lm(
+  data = d2 %>% 
+    select(patient, seqn, treat, logit_score) %>% 
+    pivot_wider(names_from = treat, values_from = logit_score) %>% 
+    mutate(dif = formoterol - salbutamol),
+  dif ~ 0 + seqn
+) 
+
+summary(fit4.5)
+
+avg_predictions(fit4.5, 
+                newdata = nd,
+                # for t-distribution based inference and CIs
+                df = insight::get_df(fit4.5)) %>% 
+  data.frame() %>% 
+  mutate_all(.funs = ~ round(., digits = 3))
+```
+
+Our results match those Senn reported in the middle of page 94, but I don't know they're any more interpretable. 
+
+Here we transform the logit score of -1.0221 back into its expected VAS value (p. 95).
+
+```{r}
+logit_score <- -1.0221
+100 * (exp(logit_score) / (1 + exp(logit_score)))
+```
+
+We can also do this with help from `plogis()` and a little multiplicative scaling.
+
+```{r}
+100 * plogis(logit_score)
+```
+
+We cannot just do this with out logis-score ATE, however. That is because we computed that from a model of logit-score difference values.
+
+In the middle of page 95, Senn then briefly considered an alternative *arc sine transformation* for VAS data. Here we make that version of the `vas` values and save the results as `arc_sine_score`.
+
+```{r}
+d2 <- d2 %>% 
+  mutate(arc_sine_score = asin(sqrt(vas / 100)))
+
+# what?
+d2 %>% 
+  select(vas:arc_sine_score) %>% 
+  head()
+```
+
+Note, the *arc sine transformation* is typically done with 0-to-1 data, and the reason we divide the `vas` values by 100 is to scale them that way before the transformation.
+
+Here's our version of left-hand side of Table 4.3 (p. 96).
+
+```{r}
+d2 %>% 
+  mutate(sequence = ifelse(seqn == "forsal", "for/sal", "sal/for"),
+         patient = as.double(patient)) %>% 
+  select(sequence, patient, treat, logit_score) %>%
+  pivot_wider(names_from = treat, values_from = logit_score) %>% 
+  mutate(basic_estimator = round(formoterol - salbutamol, digits = 3)) %>% 
+  mutate_at(.vars = vars(formoterol:salbutamol),
+            .funs = ~ round(., digits = 4)) %>% 
+  arrange(sequence, patient) %>% 
+  as_grouped_data(groups = c("sequence")) %>% 
+  flextable() %>% 
+  padding(padding.top = 2, padding.bottom = 2, part = "all")
+```
+
+Now here's our version of right-hand side of Table 4.3 (p. 96).
+
+```{r}
+d2 %>% 
+  mutate(sequence = ifelse(seqn == "forsal", "for/sal", "sal/for"),
+         patient = as.double(patient)) %>% 
+  select(sequence, patient, treat, arc_sine_score) %>%
+  pivot_wider(names_from = treat, values_from = arc_sine_score) %>% 
+  mutate(basic_estimator = round(formoterol - salbutamol, digits = 4)) %>% 
+  mutate_at(.vars = vars(formoterol:salbutamol),
+            .funs = ~ round(., digits = 5)) %>% 
+  arrange(sequence, patient) %>% 
+  as_grouped_data(groups = c("sequence")) %>% 
+  flextable() %>% 
+  padding(padding.top = 2, padding.bottom = 2, part = "all")
+```
+
+Here's what the logit transform looks like for VAS values ranging from 0 to 100.
+
+Here's what the *arc sine transformation* looks like across the full scale of the VAS scores.
+
+```{r}
+tibble(vas = 0:100) %>% 
+  mutate(arc_sine_score = asin(sqrt(vas / 100))) %>% 
+  
+  ggplot(aes(x = vas, y = arc_sine_score)) +
+  geom_point()
+```
+
+I'm really not sure what's gained by this. But anyway, here's our Gaussian CROS analysis model for the arc-sine-transformed version of the VAS scores.
+
+```{r}
+fit4.6 <- lm(
+  data = d2 %>% 
+    select(patient, seqn, treat, arc_sine_score) %>% 
+    pivot_wider(names_from = treat, values_from = arc_sine_score) %>% 
+    mutate(dif = formoterol - salbutamol),
+  dif ~ 0 + seqn
+) 
+
+summary(fit4.6)
+
+avg_predictions(fit4.6, 
+                newdata = nd,
+                # for t-distribution based inference and CIs
+                df = insight::get_df(fit4.5)) %>% 
+  data.frame() %>% 
+  mutate_all(.funs = ~ round(., digits = 3))
+```
+
+Our $t$-value matches the one Senn reported below Equation 4.3 on page 95.
+
+### 4.2.3 Other transformations.
+
+Little for us here, other than to note Senn approves of Poisson refression for counts.
+
+## 4.3 Non-parameterc methods
+
+Meh to all of this.
+
+### 4.3.1 Ignoring the effect of period.
+
+### 4.3.2 Methods based on the sign test.
+
+### 4.3.3 Methods based on the Wilcoxon signed rank test.
+
+### 4.3.4 A permutation test.
+
+### 4.3.5 Computer analysis ignoring the period effect.
+
+### 4.3.6 Allowing for the effect of period.
+
+### 4.3.7 A period adjusted sign test.
+
+### 4.3.8 An adaptation of the Brown-Mood median test.
+
+### 4.3.9 Koch's adaptation of the Wilcoxon-Mann-Whitney rank sum test.
+
+### 4.3.10 A permutation test allowing for the period effect.
+
+### 4.3.11 Computer analysis allowing for the period effect.
+
+### 4.3.12 Further non-parameterc tests*.
+
+### 4.3.13 Discussion.
+
+## 4.4 Binary outcomes
+
+"Curiously enough, although binary outcomes are extremely simple, their analysis is a delicate and controversial matter" (p. 126).
+
+We can find code for this Section from [http://www.senns.uk/CTiCR/CTICR2Programs.htm#R](http://www.senns.uk/CTiCR/CTICR2Programs.htm#R), under the Example 4.3 section. Here code below is based on that code, but adjusted for my tastes.
+
+```{r}
+# Input data values
+# n1 is number of values in first sequence,
+# n2 is number in second sequence,
+# sequence is factor of sequence labels
+n1 <- 12
+n2 <- 12
+
+d3 <- tibble(
+  seqn = factor(c(rep("forsal", n1), rep("salfor", n2))),
+  patient = factor(c(3, 4, 7, 8, 9, 11, 15, 16, 19, 20, 22, 23, 1, 2, 5, 6, 10, 12, 13, 14, 17, 18, 21, 24)),
+  `1` = c(4, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 2, 3, 4, 4, 4, 4, 4, 4, 3, 2, 2, 3),
+  `2` = c(4, 1, 1, 3, 4, 3, 3, 1, 3, 1, 3, 2, 4, 4, 4, 4, 4, 4, 4, 3, 4, 4, 4, 4)
+) %>% 
+  pivot_longer(`1`:`2`, names_to = "period", values_to = "efficacy") %>% 
+  mutate(period = factor(period, levels = 1:2),
+         binary = ifelse(efficacy == 4, 1, 0),
+         treat = case_when(
+    seqn == "salfor" & period == 1 ~ "salbutamol",
+    seqn == "salfor" & period == 2 ~ "formoterol",
+    seqn == "forsal" & period == 1 ~ "formoterol",
+    seqn == "forsal" & period == 2 ~ "salbutamol"
+  )) %>% 
+  arrange(patient, period) %>% 
+  select(seqn, patient, period, treat, efficacy, binary)
+
+# what?
+head(d3)
+```
+
+Here's a version of Figure 4.12 (p. 127).
+
+```{r}
+d3 %>% 
+  mutate(sequence = ifelse(seqn == "forsal", "for/sal", "sal/for"),
+         patient = as.double(patient),
+         efficacy = case_when(
+           binary == 0 ~ str_c(efficacy, " −"),
+           binary == 1 ~ str_c(efficacy, " +")
+         )
+         ) %>% 
+  select(sequence, patient, treat, efficacy)  %>%
+  pivot_wider(names_from = treat, values_from = efficacy) %>% 
+  select(sequence, patient, formoterol, salbutamol) %>% 
+  arrange(sequence, patient) %>% 
+  as_grouped_data(groups = c("sequence")) %>% 
+  flextable() %>% 
+  padding(padding.top = 2, padding.bottom = 1, part = "all") %>%
+  align(j = 3:4, align = "center")
+```
+
+Senn didn't do this, but here's a visualization of the `efficacy` ratings in a similar format to some of his other figures.
+
+```{r}
+d3 %>% 
+  mutate(sequence = ifelse(seqn == "forsal", "for/sal", "sal/for")) %>% 
+  
+  ggplot(aes(x = patient, y = efficacy)) +
+  geom_point(aes(shape = treat)) +
+  scale_shape_manual(values = c(0, 4)) +
+  facet_wrap(~ sequence) +
+  theme(legend.background = element_blank(),
+        legend.position = c(0.9, 0.125),
+        panel.grid = element_blank())
+```
+
+At a glance, things are looking better for formoterol.
+
+### 4.4.1 Ignoring the effect of period.
+
+Here we count the preferences, as Senn did at the bottom of page 127.
+
+```{r}
+d3 %>% 
+  select(patient, treat, binary)  %>%
+  pivot_wider(names_from = treat, values_from = binary) %>% 
+  mutate(preference = case_when(
+    formoterol == 1 & salbutamol == 0 ~ "prefer formoterol",
+    formoterol == 0 & salbutamol == 1 ~ "prefer salbutamol",
+    formoterol == salbutamol ~ "no preference"
+  ) %>% factor(levels = c("prefer formoterol", "no preference", "prefer salbutamol"))) %>% 
+  count(preference)
+```
+
+I'm not doing a McNemar's test.
+
+### 4.4.2 Allowing for period: The Mainland-Gart test.
+
+Here are the period preference counts, by `seqn`, as depicted in the inner part of Table 4.13 (p. 129).
+
+```{r}
+d3 %>% 
+  select(patient, seqn, period, binary)  %>%
+  pivot_wider(names_from = period, values_from = binary) %>% 
+  mutate(preference = case_when(
+    `1` == 1 & `2` == 0 ~ "prefer first period",
+    `1` == 0 & `2` == 1 ~ "prefer second period",
+    `1` == `2` ~ "no preference"
+  ) %>% factor(levels = c("prefer first period", "no preference", "prefer second period"))) %>% 
+  count(seqn, preference, .drop = FALSE) %>% 
+  pivot_wider(names_from = preference, values_from = n)
+```
+
+The inner portion of Table 4.14 is much the same, but without one of the columns.
+
+```{r}
+d3 %>% 
+  select(patient, seqn, period, binary)  %>%
+  pivot_wider(names_from = period, values_from = binary) %>% 
+  mutate(preference = case_when(
+    `1` == 1 & `2` == 0 ~ "prefer first period",
+    `1` == 0 & `2` == 1 ~ "prefer second period",
+    `1` == `2` ~ "no preference"
+  ) %>% factor(levels = c("prefer first period", "no preference", "prefer second period"))) %>% 
+  count(seqn, preference, .drop = FALSE) %>% 
+  pivot_wider(names_from = preference, values_from = n) %>% 
+  select(-`no preference`)
+```
+
+I'm not going to do a Mainland-Gart test. However, we might practice a little with what an aggregated binomial model of these data might look like. First, we'll save a version of those Table 3.14 counts in a data frame called `t3.14.data`.
+
+```{r}
+t3.14.data <- d3 %>% 
+  select(patient, seqn, period, binary)  %>%
+  pivot_wider(names_from = period, values_from = binary) %>% 
+  mutate(preference = case_when(
+    `1` == 1 & `2` == 0 ~ "prefer first period",
+    `1` == 0 & `2` == 1 ~ "prefer second period",
+    `1` == `2` ~ "no preference"
+  ) %>% factor(levels = c("prefer first period", "no preference", "prefer second period"))) %>% 
+  count(seqn, preference, .drop = FALSE) %>% 
+  filter(preference != "no preference") %>% 
+  mutate(total = sum(n))
+
+# what?
+print(t3.14.data)
+```
+
+Here's how one might fit an aggregated binomial model to those data.
+
+```{r}
+fit4.7 <- glm(
+  data = t3.14.data,
+  family = binomial,
+  n / total ~ 1 + seqn + preference + seqn : preference,
+  weights = total)
+
+summary(fit4.7)
+```
+
+Look at those large standard errors. The difficulty with these data is the zero-count in the cell with `seqn == "forsal"` and `preference == "prefer second period"`. Frequentist binomial regression always has a hard time with exact-zero cells.
+
+### 4.4.3 Allowing for period: Prescott's test.
+
+I'm not doing this. But if we don't discard the information from those with no preference, we might update our aggregated binomial approach. First, we make a data set called `t3.13.data`, which resembles the data from Table 3.13.
+
+```{r}
+t3.13.data <- d3 %>% 
+  select(patient, seqn, period, binary)  %>%
+  pivot_wider(names_from = period, values_from = binary) %>% 
+  mutate(preference = case_when(
+    `1` == 1 & `2` == 0 ~ "prefer first period",
+    `1` == 0 & `2` == 1 ~ "prefer second period",
+    `1` == `2` ~ "no preference"
+  ) %>% factor(levels = c("prefer first period", "no preference", "prefer second period"))) %>% 
+  count(seqn, preference, .drop = FALSE) %>% 
+  mutate(total = sum(n))
+
+# what?
+print(t3.13.data)
+```
+
+Now fit the updated model.
+
+```{r}
+fit4.8 <- glm(
+  data = t3.13.data,
+  family = binomial,
+  n / total ~ 1 + seqn + preference + seqn : preference,
+  weights = total)
+
+summary(fit4.8)
+```
+
+Sadly, that exact-zero cell still haunts us.
+
+### 4.4.4 Ezzet and Whitehead's random effect approach*.
+
+Now we're talking. Ezzet and Whitehead (1992; https://doi.org/10.2307/2347622) proposed a full model
+
+$$
+\begin{align*}
+\text{binary}_{ij} & \sim \operatorname{Binomial}(n = 1, p_{ij}) \\
+\operatorname{logit}(p_{ij}) & = \beta_0 + \beta_1 \text{tx}_{ij} + \beta_2 \text{period}_{ij} + \beta_3 \text{tx}_{ij} \text{period}_{ij} + u_j \\
+u_j & \sim \operatorname{Normal}(0, \sigma_u)
+\end{align*}
+$$
+
+where you have a full treatment-by-period interaction, and a random intercept. Based on his SAS code (pp. 132--133), Senn seemed to fit a special case of this model which left out the interaction term $\beta_3$. Here's our `glmer()` version of Senn's model.
+
+```{r}
+fit4.9 <- glmer(
+  data = d3,
+  family = binomial,
+  binary ~ treat + period + (1 | patient)
+)
+
+summary(fit4.9)
+```
+
+Our model summary mirrors the summary Senn reported on page 133. In short, though we have clear evidence of a treatment effect, there's little evidence for a period effect.
+
+It's hard to intpret things on the log-odds scale. Happily, we can use functions like `predictions()` to compute the population probabilities for the four cells.
+
+```{r}
+nd <- d3 %>% 
+  distinct(treat, period) %>% 
+  arrange(period, treat)
+
+predictions(fit4.9, newdata = nd, re.form = NA) %>% 
+  data.frame() %>% 
+  select(estimate, starts_with("conf."), treat:period)
+```
+
+We can use `comparisons()` to compute the probability differences for `treat`, separately by each level of `period`.
+
+```{r}
+nd <- d3 %>% 
+  distinct(period)
+
+comparisons(fit4.9, newdata = nd, re.form = NA, variables = list(treat = "revpairwise")) %>% 
+  data.frame() %>% 
+  select(period, contrast:std.error, p.value, starts_with("conf.")) %>% 
+  mutate_if(is.double, round, digits = 3)
+```
+
+If we want the average of the `period`-level results, we can use `avg_comparisons()`, instead.
+
+```{r}
+avg_comparisons(fit4.9, newdata = nd, re.form = NA, variables = list(treat = "revpairwise")) %>% 
+  data.frame() %>% 
+  select(contrast:std.error, p.value, starts_with("conf.")) %>% 
+  mutate_if(is.double, round, digits = 3)
+```
+
+Though not shown in the text, here's the full model with the interaction term.
+
+```{r}
+fit4.10 <- glmer(
+  data = d3,
+  family = binomial,
+  binary ~ treat + period + treat : period + (1 | patient)
+)
+
+summary(fit4.10)
+```
+
+Compute the population probabilities for the four cells.
+
+```{r}
+nd <- d3 %>% 
+  distinct(treat, period) %>% 
+  arrange(period, treat)
+
+predictions(fit4.10, newdata = nd, re.form = NA) %>% 
+  data.frame() %>% 
+  select(estimate, starts_with("conf."), treat:period)
+```
+
+We might check how well those estimates compare with the simple sample statistics.
+
+```{r}
+d3 %>% 
+  group_by(period, treat) %>% 
+  summarise(prob = mean(binary))
+```
+
+They match (as they well should)!
+
+Now compute the probability differences for `treat`, separately by each level of `period`.
+
+```{r}
+nd <- d3 %>% 
+  distinct(period)
+
+comparisons(fit4.10, newdata = nd, re.form = NA, variables = list(treat = "revpairwise")) %>% 
+  data.frame() %>% 
+  select(period, contrast:std.error, p.value, starts_with("conf.")) %>% 
+  mutate_if(is.double, round, digits = 3)
+```
+
+Compute the average of the `period`-level results.
+
+```{r}
+avg_comparisons(fit4.10, newdata = nd, re.form = NA, variables = list(treat = "revpairwise")) %>% 
+  data.frame() %>% 
+  select(contrast:std.error, p.value, starts_with("conf.")) %>% 
+  mutate_if(is.double, round, digits = 3)
+```
+
+In this case, the answer is almost identical to the one from the simpler model without the interaction term.
+
+### 4.4.5 Other approaches*.
+
+## 4.5 Ordered categorical data
+
+We might make our version of Table 4.15 as a tile plot.
+
+```{r}
+crossing(p1 = factor(1:4, 
+                     levels = 1:4,
+                     labels = c("poor", "fair", "moderate", "good")),
+         p2 = factor(1:4, 
+                     levels = 1:4,
+                     labels = c("poor", "fair", "moderate", "good"))) %>% 
+  mutate(d = as.double(p2) - as.double(p1)) %>% 
+  mutate(categorization = factor(d,
+                                 levels = -3:3,
+                                 labels = c("much worse", "worse", "worse", "same", "better", "better", "much better"))) %>% 
+  mutate(p1 = fct_rev(p1)) %>% 
+  
+  ggplot(aes(x = p2, y = p1)) +
+  geom_tile(aes(fill = d),
+            show.legend = F) +
+  geom_text(aes(label = categorization)) +
+  scale_fill_viridis_c(option = "A", begin = .5) +
+  scale_x_discrete("Period 2", expand = expansion(mult = 0), position = "top") +
+  scale_y_discrete("Period 1", expand = expansion(mult = 0)) +
+  theme(axis.text.y = element_text(hjust = 0))
+```
+
+These are basically ordinal change scores. 
+
+Here we'll make a new version of the data set that uses the change scores. Their numeric values will be saved as `d`, and their categorical values will be saved as `categorization`. The new version of the data set will have only one row per participant, and will be called `d4`.
+
+```{r}
+d4 <- d3 %>% 
+  select(-treat, -binary) %>% 
+  mutate(period = str_c("p", period)) %>% 
+  pivot_wider(names_from = period, values_from = efficacy) %>% 
+  mutate(d = p2 - p1) %>% 
+  mutate(categorization = factor(d,
+                                 levels = -3:3,
+                                 labels = c("much worse", "worse", "worse", "same", "better", "better", "much better")))
+
+# what?
+head(d4)
+```
+
+Here's a version of Table 4.16 (p. 136).
+
+```{r}
+bind_rows(
+  # conditional on sequence
+  d4 %>% 
+    mutate(sequence = ifelse(seqn == "forsal", "for/sal", "sal/for")) %>% 
+    count(sequence, categorization, .drop = FALSE) %>% 
+    pivot_wider(names_from = categorization, values_from = n),
+  # overall
+  d4 %>% 
+    count(categorization, .drop = FALSE) %>% 
+    pivot_wider(names_from = categorization, values_from = n) %>% 
+    mutate(sequence = "both") %>% 
+    select(sequence, everything())
+) %>% 
+  flextable()
+```
+
+As this data set has no `much better` values, let's make a version of the `categorization` variable that doesn't have that as a factor level. We'll call it `cat`.
+
+```{r}
+d4 <- d4 %>% 
+  mutate(cat = factor(categorization, levels = c("much worse", "worse", "same", "better")))
+
+# does it pass the check?
+d4 %>% 
+  distinct(d, categorization, cat) %>% 
+  arrange(d)
+```
+
+I'm not going to go through a lot of the hand calculations Senn reported on pages 136--137. But before we jump straight to the full ordered logit model he preseented at the bottom of page 137, we'll first fit a intercepts-only ordered logit model with `MASS::polr()`.
+
+```{r}
+fit4.11 <- MASS::polr(
+  data = d4,
+  cat ~ 1,
+  Hess = T)  # to compute the Hessian
+
+summary(fit4.11)
+```
+
+The estimates in the `Intercepts` section of the `summary()` output are the thresholds or cut-points. We can compute them from the `d4` data by hand like so.
+
+```{r}
+d4 %>% 
+  count(cat) %>% 
+  mutate(proportion = n / sum(n)) %>% 
+  mutate(cumulative_proportion = cumsum(proportion)) %>% 
+  mutate(logit_threshold = qlogis(cumulative_proportion))
+```
+
+As is always the case with cumulative models, we get the final threshold $\infty$ for free. Now we're warmed up, here's the model where the latent mean is conditional on `seqn`.
+
+```{r}
+fit4.12 <- MASS::polr(
+  data = d4,
+  cat ~ 1 + seqn,
+  Hess = T)  # to compute the Hessian
+
+summary(fit4.12)
+```
+
+It appears Senn coded his `GROUP` variable in the opposite direction of our `seqn` variable. Thus if you flip the sign, our $\beta_1$ coefficient has the same point estimate as the one Senn reported at the top of page 138, and they both have the same standard error.
+
+The large positive $\hat \beta_1$ value means there's a much larger overall probability those in the `salfor` group had `better` outcomes in the second period (i.e., during the formoterol) treatment, than those in the `forsal` group (i.e., when they got the salbutamol treatment).
+
+### 4.5.1 Discussion of the logistic regression procedure.
+
+### 4.5.2 An alternative approach using the original categories.*
+
+Within the frequentist paradigm, it's possible to fit multilevel ordinal models to the original `efficacy` variable directly with the `clmm()` function from the **ordinal** package.
+
+Here's how to fit an intercepts-only model. Note our use of the `nAGQ = 50` setting. The model had convergence problems with the lower default settings. You can find some recommendations for such cases at [https://stat.ethz.ch/pipermail/r-sig-mixed-models/2011q1/015328.html](https://stat.ethz.ch/pipermail/r-sig-mixed-models/2011q1/015328.html).
+
+```{r}
+fit4.13 <- clmm(
+  data = d3 %>% mutate(efficacy = factor(efficacy)),
+  efficacy ~ 1 + (1 | patient),
+  nAGQ = 50)
+
+summary(fit4.13)
+```
+
+We can check the validity of those thresholds with thresholds computed by hand.
+
+```{r}
+d3 %>% 
+  count(efficacy) %>% 
+  mutate(proportion = n / sum(n)) %>% 
+  mutate(cumulative_proportion = cumsum(proportion)) %>% 
+  mutate(logit_threshold = qlogis(cumulative_proportion))
+```
+
+Spot on.
+
+Now fit a model with a `treat` effect.
+
+```{r}
+fit4.14 <- clmm(
+  data = d3 %>% mutate(efficacy = factor(efficacy)),
+  efficacy ~ 1 + treat + (1 | patient))
+
+summary(fit4.14)
+```
+
+The $\beta_1$ coefficient is very low, indicating the `efficacy` ratings were much higher for the reference treatment `formoterol`. 
+
+Now control for `period`.
+
+```{r}
+fit4.15 <- clmm(
+  data = d3 %>% mutate(efficacy = factor(efficacy)),
+  efficacy ~ 1 + treat + period + (1 | patient))
+
+summary(fit4.15)
+```
+
+Add a treatment-by-period interaction.
+
+```{r}
+fit4.16 <- clmm(
+  data = d3 %>% mutate(efficacy = factor(efficacy)),
+  efficacy ~ 1 + treat + period + treat : period + (1 | patient))
+
+summary(fit4.16)
+```
+
+If you want, you can use the probit link by setting `link = "probit"`, instead.
+
+```{r}
+fit4.16 <- clmm(
+  data = d3 %>% mutate(efficacy = factor(efficacy)),
+  link = "probit",
+  efficacy ~ 1 + treat + period + treat : period + (1 | patient))
+
+summary(fit4.16)
+```
+
+Glorious.
+
+Sadly, `clmm()` models are not supported by **marginaleffects** functions. For robust post-processing functionality, you'll want to switch to **brms**.
+
+```{r, eval = F, echo = F}
+nd <- d3 %>% 
+  distinct(period)
+
+comparisons(fit4.16, newdata = nd, re.form = NA, variables = list(treat = "revpairwise")) %>% 
+  data.frame() %>% 
+  select(period, contrast:std.error, p.value, starts_with("conf.")) %>% 
+  mutate_if(is.double, round, digits = 3)
+```
+
+## 4.6 Frequency data
+
+The Poisson distribution is a natural choice for unbounded count data.
+
+It looks like Senn did not provide code for the Example 4.4 data set on his website. However, you can derive the data set (with complications we'll describe in a bit) from Table 4.17 (p. 140). Here's the inner portion of the upper half of the table (i.e., those in the placebo/salmeterol group).
+
+```{r}
+d5 <- tibble(
+  placebo = rep(0:3, times = 4),
+  salmeterol = rep(0:3, each = 4),
+  n = c(27, 9, 0, 1, 3, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0)
+)
+
+# what?
+glimpse(d5)
+```
+
+Here's the inner portion of the lower half of the table (i.e., those in the salmeterol/placebo group).
+
+```{r}
+d6 <- tibble(
+  placebo = rep(c(0:2, 4, 6), times = 4),
+  salmeterol = rep(0:3, each = 5),
+  n = c(24, 10, 0, 0, 0, 7, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+)
+
+# what?
+glimpse(d6)
+```
+
+We might check we got the values right by plotting the counts from the table in two tile plots.
+
+```{r}
+d5 %>% 
+  mutate(placebo = factor(placebo), 
+         salmeterol = factor(salmeterol)) %>% 
+  mutate(placebo = fct_rev(placebo)) %>% 
+  
+  ggplot(aes(x = salmeterol, y = placebo)) +
+  geom_tile(aes(fill = n)) +
+  geom_text(aes(label = n)) +
+  scale_fill_viridis_c(begin = .5) +
+  scale_x_discrete(position = "top") +
+  labs(title = "Table 4.17 (upper)",
+       subtitle = "Cell counts for the salmeterol/placebo group")
+
+d6 %>% 
+  mutate(placebo = factor(placebo), 
+         salmeterol = factor(salmeterol)) %>% 
+  mutate(placebo = fct_rev(placebo)) %>% 
+  
+  ggplot(aes(x = salmeterol, y = placebo)) +
+  geom_tile(aes(fill = n)) +
+  geom_text(aes(label = n)) +
+  scale_fill_viridis_c(begin = .5) +
+  scale_x_discrete(position = "top") +
+  labs(title = "Table 4.17 (lower)",
+       subtitle = "Cell counts for the placebo/salmeterol group")
+```
+
+The counts match with those in Table 4.17. However, the table contains a typo. In the second line of the upper quadrant, the number in the 'Total' column reads 9, but the actual total for that row is 10. The final value at the bottom fo the 'Total' column should probably read 42. This mistake gets magnified in the prose where Senn wrote: "A summary of the results for the *86* patients who did complete the trial is given in Table 4.17" (p. 139, *emphasis* added). Turns out the sample size should be 87.
+
+Anyway, here we combine the `d5` and `d6` data sets into a whole, and `uncount()` the cells. The results are saved as `d7`.
+
+```{r}
+d7 <- bind_rows(
+  # ps
+  d5 %>% 
+    uncount(weights = n) %>% 
+    mutate(patient = 1:n()) %>% 
+    pivot_longer(-patient, names_to = "treat", values_to = "count") %>% 
+    mutate(period = ifelse(treat == "placebo", 1, 2) %>% factor(levels = 1:2),
+           seqn = factor("ps", levels = c("ps", "sp"))),
+  # sp
+  d6 %>% 
+    uncount(weights = n) %>% 
+    mutate(patient = 1:n() + 42) %>% 
+    pivot_longer(-patient, names_to = "treat", values_to = "count") %>% 
+    mutate(period = ifelse(treat == "salmeterol", 1, 2) %>% factor(levels = 1:2),
+           seqn = factor("sp", levels = c("ps", "sp")))
+)
+
+# what?
+head(d7)
+```
+
+There are indeed 87 levels of `patient` in this data set.
+
+```{r}
+d7 %>% 
+  distinct(patient) %>% 
+  count()
+```
+
+So we can fit a CROS-analysis type model to these data with a multilevel-Poisson model with a random intercept. Here we do so with the `glmer()` function.
+
+```{r}
+fit4.17 <- glmer(
+  data = d7,
+  family = poisson,
+  count ~ 1 + treat + period + treat : period + (1 | patient))
+
+summary(fit4.17)
+```
+
+Here we use `predictions()` to compute the four means.
+
+```{r}
+nd <- d7 %>% 
+  distinct(treat, period)
+
+predictions(fit4.17, newdata = nd, re.form = NA)
+```
+
+We might depict those in a coefficient plot.
+
+```{r}
+predictions(fit4.17, newdata = nd, re.form = NA) %>% 
+  data.frame() %>% 
+  
+  ggplot(aes(x = estimate, xmin = conf.low, xmax = conf.high, y = treat)) +
+  geom_pointrange() +
+  xlab("Average count") +
+  facet_wrap(~ period, ncol = 1)
+```
+
+Here are the contrasts, within each level of `period`. We've presented them as a difference contrast, and also as a ratio.
+
+```{r}
+nd <- d7 %>% 
+  distinct(period)
+
+# difference
+comparisons(fit4.17, newdata = nd, re.form = NA, variables = list(treat = "pairwise")) %>% 
+  data.frame() %>% 
+  select(period, contrast:std.error, p.value, starts_with("conf.")) %>% 
+  mutate_if(is.double, round, digits = 3)
+
+# ratio
+comparisons(fit4.17, newdata = nd, re.form = NA, variables = list(treat = "pairwise"), comparison = "ratio") %>% 
+  data.frame() %>% 
+  select(period, contrast:std.error, p.value, starts_with("conf.")) %>% 
+  mutate_if(is.double, round, digits = 3)
+```
+
+Here present the contrasts, but averaging over `period`.
+
+```{r}
+# difference
+avg_comparisons(fit4.17, newdata = nd, re.form = NA, variables = list(treat = "pairwise")) %>% 
+  data.frame() %>% 
+  select(contrast:std.error, p.value, starts_with("conf.")) %>% 
+  mutate_if(is.double, round, digits = 3)
+
+# ratio
+avg_comparisons(fit4.17, newdata = nd, re.form = NA, variables = list(treat = "pairwise"), comparison = "ratio") %>% 
+  data.frame() %>% 
+  select(contrast:std.error, p.value, starts_with("conf.")) %>% 
+  mutate_if(is.double, round, digits = 3)
+```
+
+Why not look at those in a plot?
+
+```{r}
+bind_rows(
+  avg_comparisons(fit4.17, newdata = nd, re.form = NA, variables = list(treat = "pairwise")),
+  avg_comparisons(fit4.17, newdata = nd, re.form = NA, variables = list(treat = "pairwise"), comparison = "ratio")
+) %>% 
+  data.frame() %>% 
+  
+  ggplot(aes(x = estimate, xmin = conf.low, xmax = conf.high, y = contrast)) +
+  geom_pointrange() +
+  xlab("Treatment contrast (averaging over experimental period)") 
+```
+
+When we express the contrast as a ratio, the results match nicely with Senn's: "This is our point estimate of the treatment effect of salmeterol, namely that it reduces exacerbations to approximately one-half" (p. 141). 
+
+The standard error for our ratio contrast is considerably smaller than the one Senn reported on page 142.
+
+## 4.7 'Survival' data*
+
+Skipping this for another time.
+
+### 4.7.1 A method based on 'preferences.'
+
+### 4.7.2 An adaptation of the Wilcoxon test.
+
+### 4.7.3 Other approaches.
+
+## 4.8 Final remarks
+
+Senn was excited for GLMM developments, and it appears they have indeed appeared.
+
+## Session info
+
+```{r}
+sessionInfo()
+```
+
