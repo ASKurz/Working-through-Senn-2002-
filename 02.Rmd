@@ -1,0 +1,459 @@
+---
+title: "02: Some basic considerations concerning estimation in clinical trials"
+author: "A Solomon Kurz"
+date: "`r format(Sys.Date())`"
+output:
+  github_document
+always_allow_html: true 
+---
+
+## 2.1 The purpose of this chapter
+
+Senn opened:
+
+> The purpose of this chapter is to review various basic statistical concepts regarding clinical trials which will either be referred to subsequently or assumed as general background knowledge. (p. 17)
+
+## 2.2 Assumed background knowledge
+
+## 2.3 Control in clinical trials
+
+This section is worth a read, particularly for those not familiar with the contemporary causal inference paradigm.
+
+## 2.4 Two purposes of estimation
+
+We want to assess the causal estimand for those in the trial, and to make inferences for other potential persons in the future. Both are hard.
+
+## 2.5 Some features of estimation
+
+In pages 28-29, we lean that given
+
+$$
+Y_i \sim \mathcal N(\mu, \sigma),
+$$
+
+when we take some finite sample $n$, the sample variance for the point estimate of the mean, $\bar y$, is $\hat \sigma^2 / n$. Let's see this in action.
+
+```{r, warning = F, message = F}
+# load
+library(tidyverse)
+library(broom)
+library(marginaleffects)
+
+# how many do you want?
+n <- 1000
+
+# simulate
+set.seed(1)
+d <- tibble(y = rnorm(n = n))
+```
+
+The standard error for $\hat \mu$ is 0.03273. Here's the population value for $\sigma^2 / n$.
+
+```{r}
+1 / n
+```
+
+Here's the sample value.
+
+```{r}
+d %>% 
+  summarise(var_y_bar = var(y) / n())
+```
+
+Now notice what happens when we fit an intercept-only model to the data.
+
+```{r}
+# fit
+fit2.1 <- lm(
+  data = d,
+  y ~ 1
+)
+
+# summarize
+summary(fit2.1)
+```
+
+See the standard error for $\beta_0$? Here's what happens when we square that value, placing it in a variance metric.
+
+```{r}
+vcov(fit2.1) %>% as.double()
+```
+
+That's the same as our hand-computed `var_y_bar` value, above. Here's another way to pull that value from the model.
+
+```{r}
+sigma(fit2.1)^2 / n
+```
+
+
+
+
+```{r}
+# 2 treatments
+n_tx <- 2
+
+# 2 centers 
+n_center <- 2
+
+# each center recruits toward the goal of n patients (in total); BUT
+# we do not assume the two centers have the same sizes
+n <- 1000
+
+# we assume equal numbers in the 2 levels of tx
+
+# we assume constant variance (SD)
+sigma_e <- 1
+
+# we start with a simple model with constant ATE by center
+tau <- 1
+
+# here's the control mean
+beta0 <- 0
+
+# simulate
+set.seed(2)
+
+d <- tibble(
+  id = 1:n,
+  # we assume equal numbers in the 2 levels of tx
+  tx = rep(0:1, each = n / n_tx) %>% 
+    sample(size = n, replace = FALSE),
+  # center is totally random, and does not presume equality of size
+  center = (0:1) %>% sample(size = n, replace = TRUE)
+) %>% 
+  mutate(y = rnorm(n = n,
+                   mean = beta0 + tau * tx, 
+                   sd = sigma_e))
+
+# what?
+head(d)
+```
+
+The sample sizes are equal by `tx`.
+
+```{r}
+d %>% 
+  count(tx)
+```
+
+However, they are only probabilistically equal by `center`, and thus similarily so by `center` and `tx`.
+
+```{r}
+d %>% 
+  count(center)
+
+d %>% 
+  count(center, tx)
+```
+
+Here are the grouped sample means and SDs.
+
+```{r}
+d %>% 
+  group_by(tx, center) %>% 
+  summarise(m = mean(y),
+            s = sd(y))
+```
+
+This is following the special case where
+
+$$
+\mu_\textit{IB} - \mu_\textit{IA} = \mu_\textit{IIB} - \mu_\textit{IIA} = \tau,
+$$
+
+where the Roman letters $\textit{I}$ and $\textit{II}$ indicate the two levels of `center` and the other Roman letters $\textit{A}$ and $\textit{B}$ indicate the two levels of `tx`. The average treatment effect (ATE), of course, is depicted by $\tau$.
+
+One way we might estimate the ATE is "by using the mean in each treatment group over both cent[er]s" (p. 30), which returns
+
+$$
+\hat \tau_1 = \bar Y_\textit{.B.} - \bar Y_\textit{.A.}.
+$$
+
+Here presumably *over both cent[er]s* means ignoring `center`. Here's that in code.
+
+```{r}
+d %>% 
+  group_by(tx) %>% 
+  summarise(m = mean(y)) %>% 
+  pivot_wider(names_from = tx, values_from = m) %>% 
+  mutate(tau_1 = `1` - `0`)
+```
+
+This estimator $\hat \tau_1$ is unbiased only presuming 
+
+* equal sample sizes between centers (which we don't have); or
+* equality of means by `tx` across centers
+  - that is $\mu_\textit{IA} = \mu_\textit{IIA}$ and $\mu_\textit{IB} = \mu_\textit{IIB}$;
+  - which we only have at the population level, but not in the sample.
+
+Let's reproduce our sample-statistic approach with a model.
+
+```{r}
+fit2.2 <- lm(
+  data = d,
+  y ~ tx
+)
+
+summary(fit2.2)
+```
+
+The $\hat \beta_1$ value is the same as our hand-computed $\hat \tau_1$ value. Here's a simulation looking at the properties of this approach.
+
+```{r}
+sim_tau1 <- function(seed = 1, n = 100, tau = 1, beta0 = 0, sigma_e = 1) {
+  
+  # 2 treatments
+  n_tx <- 2
+  
+  # each center recruits toward the goal of n patients (in total); BUT
+  # we do not assume the two centers have the same sizes
+  n <- n
+  
+  # we assume equal numbers in the 2 levels of tx
+  
+  # we assume constant variance (SD)
+  sigma_e <- sigma_e
+  
+  # we start with a simple model with constant ATE by center
+  tau <- tau
+  
+  # here's the control mean
+  beta0 <- beta0
+  
+  # simulate
+  set.seed(seed)
+  
+  d <- tibble(
+    id = 1:n,
+    # we assume equal numbers in the 2 levels of tx
+    tx = rep(0:1, each = n / n_tx) %>% 
+      sample(size = n, replace = FALSE),
+    # center is totally random, and does not presume equality of size
+    center = (0:1) %>% sample(size = n, replace = TRUE)
+  ) %>% 
+    mutate(y = rnorm(n = n, mean = beta0 + tau * tx, sd = sigma_e))
+  
+  # fit
+  fit_sim <- lm(
+    data = d,
+    y ~ tx
+  )
+  
+  # summarize
+  tidy(fit_sim) %>% slice(2)
+  
+}
+```
+
+
+```{r}
+sim_tau1(seed = 1, n = 100, tau = 1, beta0 = 0, sigma_e = 1)
+```
+
+```{r}
+# 1.715423 secs
+t0 <- Sys.time()
+sim_n100_i1000 <- tibble(seed = 1:1000) %>% 
+  mutate(tidy = map(.x = seed, .f = sim_tau1)) %>% 
+  unnest(tidy)
+
+t1 <- Sys.time()
+t1 - t0
+```
+
+What's the bias?
+
+```{r}
+sim_n100_i1000 %>% 
+  summarise(m = mean(estimate),
+            b = 1 - abs(mean(estimate)),
+            sd_e = sd(estimate))
+```
+
+The bias is minimal, even with $N = 100$.
+
+The population variance for the $\tau_1$ estimator is $2 \sigma^2 / n$. Here's that value, and it's transformation into a standard-deviation metric, for the kind of data in our simulation based on $N = 100$.
+
+```{r}
+sqrt(2 * 1^2 / 100)
+```
+
+We have a upward bias in the variance (i.e., an inefficiency issue).
+
+```{r}
+fit2.3 <- lm(
+  data = d,
+  y ~ tx + center
+)
+
+summary(fit2.3)
+
+
+vcov(fit2.2)["tx", "tx"]
+vcov(fit2.3)["tx", "tx"]
+```  
+
+But anyway, the big thing to worry about with this method is when there is a systemic between centers such that
+
+$$
+\mu_\textit{IIA} - \mu_\textit{IA} = \mu_\textit{IIB} - \mu_\textit{IB} = \delta,
+$$
+
+where the between-`center` difference is the same within levels of the experimental condition `tx`. There are special cases where $\tau_1$ is still an unbiased estimator for this, but we can instead construct a different estimator as
+
+$$
+\hat \tau_2 = \frac{(\bar Y_\textit{IB.} - \bar Y_\textit{IA.}) + (\bar Y_\textit{IIB.} - \bar Y_\textit{IIA.})}{2},
+$$
+
+which will work even with unbalanced cell sizes.
+
+Let's simulate new `d` data accomodating our new $\delta$ parameter.
+
+```{r}
+# 2 treatments
+n_tx <- 2
+
+# 2 centers 
+n_center <- 2
+
+# each center recruits toward the goal of n patients (in total); BUT
+# we do not assume the two centers have the same sizes
+n <- 1000
+
+# we assume equal numbers in the 2 levels of tx
+
+# we assume constant variance (SD)
+sigma_e <- 1
+
+# we start with a simple model with constant ATE by center
+tau <- 1
+
+# here's the control mean
+beta0 <- 0
+
+# here's the center difference
+delta <- 0.5
+
+# simulate
+set.seed(2)
+
+d <- tibble(
+  id = 1:n,
+  # we assume equal numbers in the 2 levels of tx
+  tx = rep(0:1, each = n / n_tx) %>% 
+    sample(size = n, replace = FALSE),
+  # center is totally random, and does not presume equality of size
+  center = (0:1) %>% sample(size = n, replace = TRUE)
+) %>% 
+  mutate(y = rnorm(n = n,
+                   mean = beta0 + tau * tx + delta * center, 
+                   sd = sigma_e))
+
+# what?
+head(d)
+```
+
+Here are the new grouped sample means and SDs.
+
+```{r}
+d %>% 
+  group_by(tx, center) %>% 
+  summarise(m = mean(y),
+            s = sd(y))
+```
+
+Here are the grouped estimates for $\tau$.
+
+```{r}
+d %>% 
+  group_by(tx, center) %>% 
+  summarise(m = mean(y)) %>% 
+  pivot_wider(names_from = tx, values_from = m) %>% 
+  mutate(tau = `1` - `0`)
+```
+
+Here are the grouped estimates for $\delta$ (not presuming equality of that difference within levels of `tx`).
+
+```{r}
+d %>% 
+  group_by(tx, center) %>% 
+  summarise(m = mean(y)) %>% 
+  pivot_wider(names_from = center, values_from = m) %>% 
+  mutate(delta = `1` - `0`)
+```
+
+Here's $\hat \tau_2$, by hand.
+
+```{r}
+d %>% 
+  group_by(tx, center) %>% 
+  summarise(m = mean(y)) %>% 
+  pivot_wider(names_from = tx, values_from = m) %>% 
+  mutate(tau = `1` - `0`) %>% 
+  summarise(tau_2 = sum(tau) / 2)
+```
+
+If we mean-center the `center` variable, we fit an ANHECOVA model where $\beta_1$ is essentially an estimator for $\tau_2$.
+
+```{r}
+fit2.4 <- lm(
+  data = d %>% mutate(centerc = center - mean(center)),
+  y ~ 1 + tx + center + tx : centerc
+)
+
+summary(fit2.4)
+```
+
+Here's the ANHECOVA-based $\hat \tau$ using the `avg_comparisons()` approach.
+
+```{r}
+avg_comparisons(fit2.4, variables = "tx") %>% 
+  data.frame()
+```
+
+You'll note that the results are the same as just using the $\beta_1$ coefficient. These differ from $\tau_2$ in the text because these are weighted, whereas the formula for $\tau_2$ (Equation 2.24) is not weighted.
+
+Here's the `avg_comparisons()`-based estimate for $\delta$.
+
+```{r}
+avg_comparisons(fit2.4, variables = "center") %>% 
+  data.frame()
+```
+
+If we want to replicate the un-weighted $\hat \tau_2$ approach with regression, we'll need to instead use the Oaxaca-blinder type approach where we fit the models separately by `center`, and then take the averages of their two $\hat \beta_1$ values.
+
+```{r}
+# fit the 2 models
+fit2.5 <- lm(
+  data = d %>% filter(center == 0),
+  y ~ 1 + tx
+)
+
+fit2.6 <- lm(
+  data = d %>% filter(center == 1),
+  y ~ 1 + tx
+)
+
+# summarize for fun
+summary(fit2.5)
+summary(fit2.6)
+```
+
+Now compute our version of $\hat \tau_2$.
+
+```{r}
+(coef(fit2.5)["tx"] + coef(fit2.6)["tx"]) / 2
+```
+
+If you look back, this is the same value we computed from the sample statistics. But also notice that this Oaxaca-blinder type approach does not impose the constant $\sigma^2$ assumption. 
+
+## 2.6 Practical consequences for cross-over trials
+
+This section has more to do with planning a cross-over trial, than with how to analyze the data from such a trial.
+
+## Session info
+
+```{r}
+sessionInfo()
+```
+
