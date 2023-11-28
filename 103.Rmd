@@ -1,0 +1,1206 @@
+---
+title: '103: Addendum to Chapter 3'
+author: "A Solomon Kurz"
+date: "`r format(Sys.Date())`"
+output:
+  github_document
+always_allow_html: true  
+---
+
+```{r, echo = F, cache = F}
+knitr::opts_chunk$set(fig.retina = 2.5)
+knitr::opts_chunk$set(fig.align = "center")
+options(width = 120)
+```
+
+The purpose of this file is to work through some of the models from Chapter 3, from a potential-outcomes perspective.
+
+Load the packages and make the primary data set `d`.
+
+```{r, warning = F, message = F}
+# load packages
+library(tidyverse)
+library(flextable)
+library(broom)
+library(marginaleffects)
+library(lme4)
+library(tidybayes)
+library(brms)
+
+# Input data
+n1 <- 7 #number of patients first sequence
+n2 <- 6 #number of patients second sequence
+n <- n1 + n2
+
+seqn <- factor((c(rep(1,n1), rep(2,n2), rep(1,n1), rep(2,n2))),
+               labels = c("forsal","salfor")) #sequences
+
+patient <- factor(rep(c("1","4","6","7","10","11","14","2","3","5","9","12","13"), 2),
+                  # levels = 1:14
+                  levels = c(1:7, 9:14)) 
+
+# not in the original code, but here is sex
+sex <- c("male", "female", "female", "male", "male", "female", "male", "male", "male", "female", "male", "male", "male")
+
+period <- factor(c(rep("1", n), rep("2", n)))
+
+treat <- factor(c(rep(2, n1), rep(1, n2), rep(1, n1), rep(2, n2)),
+                labels = c("salbutamol", "formoterol"))
+
+#Note: "formoterol" is coded second level of factor
+pef <- c(310, 310,370,410,250,380,330,370,310,380,290,260,90,270,260,300,390,210,350,365,385,400,410,320,340,220)
+base <- c(290,300,250,390,250,365,190,350,350,350,280,270,220,270,270,210,390,240,380,260,345,370,360,290,310,220)
+
+d <- tibble(
+  seqn = seqn,
+  patient = patient,
+  period = period,
+  treat = treat,
+  pef = pef,
+  base = base
+) %>% 
+  arrange(period, as.double(as.character(patient))) %>% 
+  mutate(sex = c(sex, sex),
+         basec = base - mean(base))
+
+# what?
+head(d)
+```
+
+We're also going to want a version of the data set that uses the basic estimator `formoterol - salbutamol` as the criterion, called `dif`. For this data set, we'll also include the first measurement of the baseline covariate `base` (i.e., for which `period == 1`).
+
+```{r}
+d2 <- d %>% 
+  select(patient, seqn, treat, pef) %>% 
+  pivot_wider(names_from = treat, values_from = pef) %>% 
+  mutate(dif = formoterol - salbutamol) %>% 
+  left_join(d %>% 
+              filter(period == 1) %>% 
+              select(patient, base),
+            by = "patient") %>% 
+  left_join(d %>% 
+              select(patient, seqn, period, base) %>% 
+              pivot_wider(names_from = period, values_from = base) %>%
+              mutate(cross_over_dif = ifelse(seqn == "forsal", `1` - `2`, `2` - `1`)) %>% 
+              select(patient, cross_over_dif),
+            by = "patient") %>% 
+  mutate(basec = base - mean(base),
+         cross_over_difc = cross_over_dif - mean(cross_over_dif))
+
+# what?
+print(d2)
+```
+
+## Dif ANOVA
+
+We might fit simple ANOVA for the difference score as
+
+$$
+\begin{align*}
+\text{dif}_i & \sim \mathcal N(\mu_i, \sigma) \\
+\mu_i & = \beta_0 + \beta_1 \text{seqn}_i,
+\end{align*}
+$$
+
+where $\beta_0$ is the formoterol-minus-salbutamol difference for those in the `forsal` group, and $\beta_1$ is the difference in that treatment difference for those in the `salfor` group, relative to those in the default `forsal` group.
+
+Here's how to fit the model with OLS via `lm()`.
+
+```{r}
+fit103.1 <- lm(
+  data = d2,
+  dif ~ seqn
+)
+
+summary(fit103.1)
+```
+
+Here are the two treatment effects, and their unweighted average, using the simple $\beta$ coefficient method.
+
+```{r}
+# define the data grid
+nd <- d2 %>% 
+  distinct(seqn)
+
+# ATE by seqn
+predictions(fit103.1, newdata = nd)
+
+# unweighted ATE
+avg_predictions(fit103.1, newdata = nd)
+```
+
+For the counterfactual potential outcomes, we'll need to update our `nd` predictor grid to include both levels of `seqn` for each of the 13 levels of `patient`.
+
+```{r}
+nd <- crossing(
+  patient = d2 %>% distinct(patient) %>% pull(),
+  seqn    = d2 %>% distinct(seqn)    %>% pull())
+
+# what?
+head(nd)
+```
+
+Here are the model-implied causal effects for each of the 26 counterfactual levels.
+
+```{r}
+predictions(fit103.1, newdata = nd)
+```
+
+Here are the ATEs, by `seqn`.
+
+```{r}
+avg_predictions(fit103.1, newdata = nd, by = "seqn")
+```
+
+Here's the ATE.
+
+```{r}
+avg_predictions(fit103.1, newdata = nd)
+```
+
+## Dif ANCOVA
+
+Here we'll fit two versions of the dif-ANCOVA. The first will be with the covariate `basec`. The second will be with the covariate `cross_over_difc`.
+
+### `basec` as covariate.
+
+We might look at the relation between `basec` and our criterion `dif` in a faceted scatter plot.
+
+```{r, fig.width = 5, fig.height = 3}
+d2 %>% 
+  ggplot(aes(x = basec, y = dif)) +
+  geom_point() +
+  stat_ellipse(alpha = 1/2) +
+  facet_wrap(~ seqn)
+```
+
+We added 95% CI elipses for good measure.
+
+We might fit simple ANCOVA for the difference score as
+
+$$
+\begin{align*}
+\text{dif}_i & \sim \mathcal N(\mu_i, \sigma) \\
+\mu_i & = \beta_0 + \beta_1 \text{seqn}_i + \beta_2 \text{basec}_i,
+\end{align*}
+$$
+
+Here's how to fit the model with OLS via `lm()`.
+
+```{r}
+fit103.2 <- lm(
+  data = d2,
+  dif ~ seqn + basec
+)
+
+summary(fit103.2)
+```
+
+Now we'll use functions from **marginaleffects** to compute the ATE by `seqn` (technically two CATEs), and the overall ATE.
+
+```{r}
+# define the data grid
+nd <- d2 %>% 
+  distinct(seqn) %>% 
+  mutate(basec = 0)
+
+# ATE by seqn
+predictions(fit103.2, newdata = nd)
+
+# unweighted ATE
+avg_predictions(fit103.2, newdata = nd)
+```
+
+### `cross_over_difc` as covariate.
+
+Now look at the relation between `cross_over_difc` and our criterion `dif` in a faceted scatter plot.
+
+```{r, fig.width = 5, fig.height = 3}
+d2 %>% 
+  ggplot(aes(x = cross_over_difc, y = dif)) +
+  geom_point() +
+  stat_ellipse(alpha = 1/2) +
+  facet_wrap(~ seqn)
+```
+
+We might fit simple ANCOVA for the difference score with `cross_over_difc` as the covariate as
+
+$$
+\begin{align*}
+\text{dif}_i & \sim \mathcal N(\mu_i, \sigma) \\
+\mu_i & = \beta_0 + \beta_1 \text{seqn}_i + \beta_2 \text{cross over difc}_i,
+\end{align*}
+$$
+
+Here's how to fit the model with the `lm()` function.
+
+```{r}
+fit103.3 <- lm(
+  data = d2,
+  dif ~ seqn + cross_over_difc
+)
+
+summary(fit103.3)
+```
+
+Use `predictions()` to compute the CATEs and then use `avg_predictions()` to compute the ATE.
+
+```{r}
+# update the data grid to include cross_over_difc
+nd <- nd %>% 
+  mutate(cross_over_difc = 0)
+
+# ATE by seqn
+predictions(fit103.3, newdata = nd)
+
+# unweighted ATE
+avg_predictions(fit103.3, newdata = nd)
+```
+
+We might want to compare the point estimates and standard errors for the ATE across the ANOVA and two ANCOVAs.
+
+```{r}
+bind_rows(
+  avg_predictions(fit103.1, newdata = nd),
+  avg_predictions(fit103.2, newdata = nd),
+  avg_predictions(fit103.3, newdata = nd)
+) %>% 
+  data.frame() %>% 
+  mutate(model = c("ANOVA", "ANCOVA", "ANCOVA"),
+         covariate = c("none", "basec", "cross_over_difc")) %>% 
+  select(model, covariate, estimate, std.error) %>% 
+  mutate_if(is.double, round, digits = 2) %>% 
+  flextable()
+```
+
+Backing up a bit, it might be helpful if we computed and displayed the counterfactual predictions and ATEs, by model. First, we need a new predictor grid with counterfactual `seqn` values for each level of `patient` that also includes their baseline covariate values for `basec` and `cross_over_difc`. We'll call it `nd_patient`.
+
+```{r}
+nd_patient <- d2 %>% 
+  distinct(patient, basec, cross_over_difc) %>% 
+  expand_grid(seqn = distinct(d2, seqn) %>% pull())
+
+# what?
+head(nd_patient)
+```
+
+Here are the person-specific CATEs, by model.
+
+```{r, fig.width = 8, fig.height = 3, warning = F}
+formulas <- c("dif ~ seqn", "dif ~ seqn + basec", "dif ~ seqn + cross_over_difc")
+
+bind_rows(
+  predictions(fit103.1, newdata = nd_patient),
+  predictions(fit103.2, newdata = nd_patient),
+  predictions(fit103.3, newdata = nd_patient)
+) %>% 
+  data.frame() %>% 
+  mutate(formula = rep(formulas, each = n() / 3)) %>% 
+  group_by(formula, seqn) %>% 
+  arrange(estimate) %>% 
+  mutate(rank = 1:n()) %>% 
+  
+  ggplot(aes(x = estimate, y = rank, color = seqn)) +
+  geom_vline(xintercept = 0, color = "white") +
+  geom_interval(aes(xmin = conf.low, xmax = conf.high),
+                position = position_dodge(width = -0.25),
+                size = 1/5) +
+  geom_point(aes(shape = seqn),
+             size = 2,
+             position = position_dodge(width = -0.25)) +
+  scale_color_viridis_d(NULL, option = "A", begin = .3, end = .6,
+                        labels = scales::parse_format()) +
+  scale_shape_manual(NULL, values = c(20, 18),
+                     labels = scales::parse_format()) +
+  scale_y_discrete(breaks = NULL) +
+  labs(subtitle = "Counterfactual predictions",
+       x = "dif",
+       y = "patient (ranked within model)") +
+  xlim(-85, 135) +
+  theme(legend.background = element_blank(),
+        panel.grid = element_blank()) +
+  facet_wrap(~ formula, nrow = 1)
+```
+
+Here are the person-specific ATEs, by model.
+
+```{r, fig.width = 8, fig.height = 3}
+bind_rows(
+  avg_predictions(fit103.1, newdata = nd_patient, by = "patient"),
+  avg_predictions(fit103.2, newdata = nd_patient, by = "patient"),
+  avg_predictions(fit103.3, newdata = nd_patient, by = "patient")
+)%>% 
+  data.frame() %>% 
+  mutate(formula = rep(formulas, each = n() / 3)) %>% 
+  group_by(formula) %>% 
+  arrange(estimate) %>% 
+  mutate(rank = 1:n()) %>% 
+  
+  ggplot(aes(x = estimate, y = rank)) +
+  geom_vline(xintercept = 0, color = "white") +
+  geom_interval(aes(xmin = conf.low, xmax = conf.high),
+                size = 1/5) +
+  geom_point() +
+  scale_y_discrete(breaks = NULL) +
+  labs(subtitle = "Treatment effects",
+       x = "dif",
+       y = "patient (ranked within model)") +
+  xlim(-85, 135) +
+  theme(panel.grid = element_blank()) +
+  facet_wrap(~ formula, nrow = 1)
+```
+
+Finally, here's a coefficient plot for the ATE from each model.
+
+```{r, fig.width = 5, fig.height = 1.25}
+bind_rows(
+  avg_predictions(fit103.1, newdata = nd),
+  avg_predictions(fit103.2, newdata = nd),
+  avg_predictions(fit103.3, newdata = nd)
+) %>% 
+  data.frame() %>% 
+  mutate(model = c("ANOVA", "ANCOVA", "ANCOVA"),
+         covariate = c("none", "basec", "cross_over_difc"),
+         formula = formulas) %>% 
+  
+  ggplot(aes(x = estimate, xmin = conf.low, xmax = conf.high, y = formula)) +
+  geom_vline(xintercept = 0, color = "white") +
+  geom_pointrange() +
+  labs(subtitle = "Average treatment effects",
+       x = "dif",
+       y = NULL) +
+  xlim(-85, 135) +
+  theme(axis.text.y = element_text(hjust = 0),
+        panel.grid = element_blank()) 
+```
+
+## `pef` ANOVA
+
+### Naive version.
+
+We might define the naive version of the simple ANOVA for the `pef` score as
+
+$$
+\begin{align*}
+\text{pef}_i & \sim \mathcal N(\mu_i, \sigma) \\
+\mu_i & = \beta_0 + \beta_1 \text{treat}_i + \beta_2 \text{period}_i + \beta_3 \text{treat}_i\text{period}_i,
+\end{align*}
+$$
+
+which should perfectly reproduce the sample means for all 4 levels of the `treat`-by-`period` grid. Here's how to fit the model with OLS.
+
+```{r}
+fit103.4 <- lm(
+  data = d,
+  pef ~ treat + period + treat : period
+)
+
+summary(fit103.4)
+```
+
+Here we compute the 4 model-based means.
+
+```{r}
+nd <- d %>% 
+  distinct(treat, period) %>% 
+  arrange(treat, period)
+
+# default SEs
+predictions(fit103.4, newdata = nd) %>% 
+  data.frame() %>% 
+  select(treat, period, estimate, std.error, contains("conf"))
+```
+
+We might check those with the sample statistics.
+
+```{r, message = F}
+d %>% 
+  group_by(treat, period) %>% 
+  summarise(mean = mean(pef))
+```
+
+All is good. They're the same.
+
+A limitation with this approach, so far, is the standard errors (and thus the 95% CIs and so on) are based on the assumption the errors are independent. But we know that because of the cross-over design, the errors are correlated within each level of `patient`. We can accommodate that complication by using robust sandwich standard errors by setting `vcov = "HC3"` within the various **marginaleffects** functions. For example, here are those 4 predictions with those sandwich standard errors.
+
+```{r}
+# robust sandwich SEs
+predictions(fit103.4, newdata = nd, vcov = "HC3") %>% 
+  data.frame() %>% 
+  select(treat, period, estimate, std.error, contains("conf"))
+```
+
+You'll note the point estimates are all the same. But the standard errors are all larger, now, and the 95% CIs are wider.
+
+Here are the treatment effects, by `period` (i.e., the CATEs), without and with robust sandwich standard errors.
+
+```{r}
+# default SEs
+comparisons(fit103.4, newdata = nd, variable = "treat", by = "period")
+
+# robust sandwich SEs
+comparisons(fit103.4, newdata = nd, variable = "treat", by = "period", vcov = "HC3")
+```
+
+Note how the SEs range from 41 to 52 for the CATEs. Here are the ATEs (averaging over `period`).
+
+```{r}
+# default SEs
+avg_comparisons(fit103.4, newdata = nd, variable = "treat")
+
+# robust sandwich SEs
+avg_comparisons(fit103.4, newdata = nd, variable = "treat", vcov = "HC3")
+```
+
+The SEs for the ATE are 29 and 33, depending on whether you want them robust (which you probably do in this case). Regardless, note how much smaller they are compared to the CATEs.
+
+Anyway, note how the point estimate for the ATE from this model is the same as the point estimate for the ATE from the dif-ANOVA model `fit103.1`.
+
+```{r}
+avg_predictions(fit103.1, newdata = d2 %>% distinct(seqn))
+```
+
+Though the point estimates are the same, the SE for the dif-ANOVA model is much smaller. Turns out this naive version of the `pef` model isn't great at handling the dependencies caused by the cross-over design. We'll explore a better model next.
+
+### Better version.
+
+We can improve our model for the `pef` score by adding dummy variables for the various levels of `patient`, where the first level of `patient` will act as the reference category. That might look like
+
+$$
+\begin{align*}
+\text{pef}_i & \sim \mathcal N(\mu_i, \sigma) \\
+\mu_i & = \beta_0 \\
+& \;\;\; + \beta_1 \text{patient}_{2, i}, \dots, \beta_{12} \text{patient}_{14, i} \\
+& \;\;\; + \beta_{13} \text{treat}_i + \beta_{14} \text{period}_i.
+\end{align*}
+$$
+
+Though this model does require a large number of dummy variables, it does appropriately handle the dependencies causes by the cross-over design. When fitting such a model with `lm()`, make sure the `patient` variable is saved as a factor, or at least as a character variable.
+
+```{r}
+fit103.5 <- lm(
+  data = d,
+  pef ~ patient + treat + period
+)
+
+summary(fit103.5)
+```
+
+Note that all the $\beta$ coefficients for the `patient` dummies are in a deviation metric relative to the reference category `patient == 1`.
+
+With this version of the model, the $\beta_{13}$ coefficient for the `treat` variable is the same as the ATE. Here's a focused look at that value.
+
+```{r}
+tidy(fit103.5) %>% 
+  filter(term == "treatformoterol") %>% 
+  select(estimate:std.error)
+```
+
+That point estimate and its standard error are the same as the ATE as computed via `avg_predictions()` from the dif-ANOVA model `fit103.1`.
+
+```{r}
+avg_predictions(fit103.1, newdata = d2 %>% distinct(seqn)) %>% 
+  data.frame() %>% 
+  select(estimate:std.error)
+```
+
+Here are the 4 model-based conditional means, by `treat` and `period`.
+
+```{r}
+# update the predictor grid
+nd <- d %>% 
+  distinct(treat, period) %>% 
+  expand_grid(patient = distinct(d, patient) %>% pull())
+
+# compute
+avg_predictions(fit103.5, newdata = nd, by = c("treat", "period"))
+```
+
+Note that with this model, because there is no `treat`-by-`period` interaction, the CATE is the same for both levels of `period`.
+
+```{r}
+avg_comparisons(fit103.5, newdata = nd, variable = "treat", by = "period")
+```
+
+It turns out both those CATEs are just the same as the ATE. Speaking of which, here's how to just compute the ATE via `avg_comparisons()`.
+
+```{r}
+avg_comparisons(fit103.5, newdata = nd, variable = "treat")
+```
+
+## `pef` ANCOVA
+
+We might fit an ANCOVA version of the last model by adding the mean-centered version of the baseline measures (`basec`) in as a covariate with the model
+
+$$
+\begin{align*}
+\text{pef}_i & \sim \mathcal N(\mu_i, \sigma) \\
+\mu_i & = \beta_0 \\
+& \;\;\; + \beta_1 \text{patient}_{2, i}, \dots, \beta_{12} \text{patient}_{14, i} \\
+& \;\;\; + \beta_{13} \text{treat}_i + \beta_{14} \text{period}_i + \color{blueviolet}{\beta_{15} \text{basec}_i}.
+\end{align*}
+$$
+
+By fitting such model, we are hoping to shrink the standard error for our ATE.
+
+```{r}
+fit103.6 <- lm(
+  data = d,
+  pef ~ patient + treat + period + basec
+)
+
+summary(fit103.6)
+```
+
+This model is the same as the `fit3.9` from Chapter 3 (with the exception we're using the mean-centered `basec` instead of `base`). The ATE in this model is still $\beta_{13}$, the coefficient for `treat`. We can confirm that's the ATE with a call from `avg_comparisons()`, provided we add `patient` and `basec` values to the predictor grid.
+
+```{r}
+avg_comparisons(fit103.6, 
+                newdata = d %>% 
+                  distinct(treat, period) %>% 
+                  mutate(patient = "1", 
+                         basec = 0) , 
+                variable = "treat")
+```
+
+The SE is indeed about 10% smaller than the one from the last model without `basec`.
+
+## `pef` multilevel ANOVA
+
+Our first multilevel `pef` model will include the two experimental variables `treat`, `period` and their interaction, following the form
+
+$$
+\begin{align*}
+\text{pef}_{it} & \sim \mathcal N(\mu_{it}, \sigma) \\
+\mu_{it} & = \beta_0 + \beta_1 \text{treat}_{it} + \beta_2 \text{period}_{it} + \beta_3 \text{treat}_{it}\text{period}_{it} + u_i \\ 
+u_i & \sim \mathcal N(0, \sigma_u),
+\end{align*}
+$$
+
+where the new subscript $t$ indicates *time* which we have effectively captured by `period` in this data set. The $i$ subscript now indicates each level of `patient`, rather than simply indexing the rows in the data set. The sole random term is $u_i$, which indicates the `patient`-specific deviations around the grand-mean intercept $\beta_0$. Those deviations are then modeled as normally-distributed with a mean of zero and a standard deviation $\sigma_u$ estimated within the context of the model. The $\sigma$ parameter is now effectively the within-person standard deviation, which means you can also think of the new $\sigma_u$ parameter as the between-person standard deviation.
+
+We will fit this model, and the other multilevel models to come, both as frequentists with `lmer()` and as Bayesians with `brm()`. Unless otherwise specified, the Bayesian models will use the weakly-regularizing default parameters provided by `brm()`. This is only for simplicity, and is *not* recommenced for real-world data analysis. You'll note we are also using the `0 + Intercept` syntax on the right side of the formulas for the `brm()` models. This is because the experimental variables `treat` and `period` are not mean centered, and we want to avoid the default priors for the conventional syntax, which are set under the presumption the predictions are indeed all mean centered. Thus, we use the `get_prior()` function to get the intercept prior `brm()` would have used had the intercept been of `class = Intercept`.
+
+```{r}
+# frequentist with REML
+fit103.7 <- lmer(
+  data = d,
+  pef ~ treat + period + treat:period + (1 | patient)
+)
+
+# get_prior(
+#   data = d,
+#   family = gaussian,
+#   pef ~ 1 + (1 | patient)
+# )
+
+# Bayesian with HMC
+brm103.7 <- brm(
+  data = d,
+  family = gaussian,
+  pef ~ 0 + Intercept + treat + period + treat:period + (1 | patient),
+  # default for the `pef ~ 1 + (1 | patient)` parameterization
+  prior = prior(student_t(3, 325, 81.5), class = b, coef = Intercept),
+  cores = 4, seed = 103,
+  file = "fits/brm103.07"
+)
+
+# summarize the models
+summary(fit103.7)
+summary(brm103.7)
+```
+
+The model summaries are generally pretty close, but not exactly the same. You'll often find the posterior SDs are a little larger in the Bayesian model than their SE counterparts in the frequentist model. This could be amended by using real non-default priors.
+
+If we use `predictions()` to compute the model-implied means for the 4 `treatment`-by-`period` groups, we can see that the point estimates and standard errors from the multilevel model `fit103.7` are the same from the earlier fixed-effects model `fit103.4`.
+
+```{r}
+# compute the predictions
+bind_rows(
+  # fit103.4
+  predictions(fit103.4,
+              newdata = d %>% 
+                distinct(treat, period)),
+  # fit103.7
+  predictions(fit103.7,
+              newdata = d %>% 
+                distinct(treat, period),
+              re.form = NA)
+) %>% 
+  # wrangle
+  data.frame() %>% 
+  mutate(fit = rep(c("fit103.4", "fit103.7"), each = n() / 2)) %>% 
+  select(treat, period, fit, estimate, std.error) %>% 
+  arrange(treat, period) %>% 
+  # for the table format
+  as_grouped_data(groups = c("treat", "period")) %>%
+  flextable() %>% 
+  padding(padding.top = 2, padding.bottom = 2, part = "all")
+```
+
+Note how for the multilevel model, we included `re.form = NA` within the `predictions()` function to clarify we wanted population-level predictions, rather than predictions for specific levels of `patient`.
+
+For the multilevel model `fit103.7`, you can also request Satterthwaite-based standard errors by setting `vcov = "satterthwaite"`.
+
+```{r}
+predictions(fit103.7,
+            newdata = d %>% 
+              distinct(treat, period),
+            re.form = NA,
+            vcov = "satterthwaite") %>% 
+  data.frame()
+```
+
+Before we compute the frequentist version of the ATE, let's first use the standardization/g-computation method to compute the ATE from the Bayesian model `brm103.7`. We'll perform and save the necessary computations in a separate step, since they take a few minutes. Then we'll summarize the results in a second step.
+
+```{r, eval = F}
+# 6.802908 mins
+brm103.7_ate <- d %>% 
+  distinct(treat, period) %>% 
+  expand_grid(patient = distinct(d, patient) %>% pull()) %>% 
+  
+  add_epred_draws(brm103.7, ndraws = 4000) %>% 
+  ungroup() %>% 
+  group_by(period, patient, .draw) %>% 
+  compare_levels(variable = .epred, by = treat) %>% 
+  # average over patient, within each level of period and .draw
+  group_by(period, .draw) %>% 
+  summarise(`formoterol - salbutamol` = mean(.epred)) %>% 
+  # average over period, within each level of .draw
+  group_by(.draw) %>% 
+  summarise(ate = mean(`formoterol - salbutamol`))
+```
+
+```{r, echo = F}
+# save(brm103.7_ate, file = "objects/brm103.7_ate.rda")
+load(file = "objects/brm103.7_ate.rda")
+```
+
+Now we can summarize the posterior for the Bayesian ATE.
+
+```{r}
+brm103.7_ate %>% 
+  summarise(mean = mean(ate),
+            sd = sd(ate))
+```
+
+This is the same as if you computed it by hand with the $\beta$ posteriors.
+
+```{r, warning = F}
+as_draws_df(brm103.7) %>% 
+  # simplify the names
+  rename(b0 = b_Intercept,
+         b1 = b_treatformoterol,
+         b2 = b_period2,
+         b3 = `b_treatformoterol:period2`) %>% 
+  # mutate() works fine, but transmute() removes the clutter
+  transmute(s1 = b0,
+            s2 = b0 + b2,
+            f1 = b0 + b1,
+            f2 = b0 + b1 + b2 + b3) %>% 
+  # compute the CATEs
+  mutate(`f1 - s1` = f1 - s1,
+         `f2 - s2` = f2 - s2) %>% 
+  # compute the ATE as the unweighted average of the CATEs
+  mutate(ate = (`f1 - s1` + `f2 - s2`) / 2) %>% 
+  summarise(m = mean(ate),
+            s = sd(ate))
+```
+
+Here's the ATE from the frequentist version of the model, using default SEs.
+
+```{r}
+avg_comparisons(fit103.7, 
+                newdata = d %>% 
+                  distinct(treat, period), 
+                variable = "treat",
+                re.form = NA)
+```
+
+## `pef` multilevel ANOVAs
+
+### Focus on `basec`.
+
+Now we'll consider a few models with covariates. The first will simply include the `basec` values,
+
+$$
+\begin{align*}
+\text{pef}_{it} & \sim \mathcal N(\mu_{it}, \sigma) \\
+\mu_{it} & = \beta_0 + \beta_1 \text{treat}_{it} + \beta_2 \text{period}_{it} + \beta_3 \text{treat}_{it}\text{period}_{it} + {\color{blueviolet}{\beta_4 \text{basec}_{it}}} + u_i \\ 
+u_i & \sim \mathcal N(0, \sigma_u),
+\end{align*}
+$$
+
+where everything else in the model is the same as before. Now we fit the model as frequentists and Bayesians.
+
+```{r}
+# frequentist with REML
+fit103.8 <- lmer(
+  data = d,
+  pef ~ treat + period + treat:period + basec + (1 | patient)
+)
+
+# Bayesian with HMC
+brm103.8 <- brm(
+  data = d,
+  family = gaussian,
+  pef ~ 0 + Intercept + treat + period + treat:period + basec + (1 | patient),
+  # default for the `pef ~ 1 + (1 | patient)` parameterization
+  prior = prior(student_t(3, 325, 81.5), class = b, coef = Intercept),
+  cores = 4, seed = 103,
+  file = "fits/brm103.08"
+)
+
+# summarize
+summary(fit103.8)
+summary(brm103.8)
+```
+
+As expected, `basec` is a strong predictor, which should help increase the precision of our ATE. Here we compute the ATE as Bayesians in the same 2-step procedure from before.
+
+```{r, eval = F}
+# 6.922178 mins
+brm103.8_ate <- d %>% 
+  select(patient, period, base, basec) %>% 
+  expand_grid(treat = d %>% distinct(treat) %>% pull()) %>% 
+  arrange(patient, period, treat) %>% 
+  
+  add_epred_draws(brm103.8, ndraws = 4000) %>% 
+  ungroup() %>% 
+  group_by(period, patient, .draw) %>% 
+  compare_levels(variable = .epred, by = treat) %>% 
+  # average over patient, within each level of period and .draw
+  group_by(period, .draw) %>% 
+  summarise(`formoterol - salbutamol` = mean(.epred)) %>% 
+  # average over period, within each level of .draw
+  group_by(.draw) %>% 
+  summarise(ate = mean(`formoterol - salbutamol`))
+```
+
+```{r, echo = F}
+# save(brm103.8_ate, file = "objects/brm103.8_ate.rda")
+load(file = "objects/brm103.8_ate.rda")
+```
+
+Now we can summarize the posterior for the Bayesian ATE.
+
+```{r}
+brm103.8_ate %>% 
+  summarise(mean = mean(ate),
+            sd = sd(ate))
+```
+
+Nice! That posterior SD is smaller than the one from the model without the covariate.
+
+This is also the same as if you computed it by hand with the $\beta$ posteriors.
+
+```{r, warning = F}
+as_draws_df(brm103.8) %>% 
+  # simplify the names
+  rename(b0 = b_Intercept,
+         b1 = b_treatformoterol,
+         b2 = b_period2,
+         b3 = `b_treatformoterol:period2`) %>% 
+  # mutate() works fine, but transmute() removes the clutter
+  transmute(s1 = b0,
+            s2 = b0 + b2,
+            f1 = b0 + b1,
+            f2 = b0 + b1 + b2 + b3) %>% 
+  # compute the CATEs
+  mutate(`f1 - s1` = f1 - s1,
+         `f2 - s2` = f2 - s2) %>% 
+  # compute the ATE as the unweighted average of the CATEs
+  mutate(ate = (`f1 - s1` + `f2 - s2`) / 2) %>% 
+  summarise(m = mean(ate),
+            s = sd(ate))
+```
+
+Here's the ATE from the frequentist version of the model, using default SEs.
+
+```{r}
+avg_comparisons(fit103.8, 
+                newdata = d %>% 
+                  distinct(treat, period) %>% 
+                  mutate(basec = 0), 
+                variable = "treat",
+                re.form = NA)
+```
+
+
+A limitation of the last model is it presumed the `basec` values would have the exact same predictive strength within each level of `period`, which might not be a safe assumption. We can generalize by adding a `basec`-by-`period` interaction term:
+
+$$
+\begin{align*}
+\text{pef}_{it} & \sim \mathcal N(\mu_{it}, \sigma) \\
+\mu_{it} & = \beta_0 + \beta_1 \text{treat}_{it} + \beta_2 \text{period}_{it} + \beta_3 \text{treat}_{it}\text{period}_{it} + \beta_4 \text{basec}_{it} + {\color{blueviolet}{\beta_5 \text{basec}_{it}\text{period}_{it}}} + u_i \\ 
+u_i & \sim \mathcal N(0, \sigma_u).
+\end{align*}
+$$
+
+Fit the model with `lmer()` and `brm()`.
+
+```{r}
+# frequentist with REML
+fit103.9 <- lmer(
+  data = d,
+  pef ~ treat + period + treat:period + basec + basec:period + (1 | patient)
+)
+
+# Bayesian with HMC
+brm103.9 <- brm(
+  data = d,
+  family = gaussian,
+  pef ~ 0 + Intercept + treat + period + treat:period + basec + basec:period + (1 | patient),
+  # default for the `pef ~ 1 + (1 | patient)` parameterization
+  prior = prior(student_t(3, 325, 81.5), class = b, coef = Intercept),
+  cores = 4, seed = 103,
+  file = "fits/brm103.09"
+)
+
+# summarize
+summary(fit103.9)
+summary(brm103.9)
+```
+
+Here we compute the ATE as Bayesians in the same 2-step procedure from before.
+
+```{r, eval = F}
+# 6.922178 mins
+brm103.9_ate <- d %>% 
+  select(patient, period, base, basec) %>% 
+  expand_grid(treat = d %>% distinct(treat) %>% pull()) %>% 
+  arrange(patient, period, treat) %>% 
+  
+  add_epred_draws(brm103.9, ndraws = 4000) %>% 
+  ungroup() %>% 
+  group_by(period, patient, .draw) %>% 
+  compare_levels(variable = .epred, by = treat) %>% 
+  # average over patient, within each level of period and .draw
+  group_by(period, .draw) %>% 
+  summarise(`formoterol - salbutamol` = mean(.epred)) %>% 
+  # average over period, within each level of .draw
+  group_by(.draw) %>% 
+  summarise(ate = mean(`formoterol - salbutamol`))
+```
+
+```{r, echo = F}
+# save(brm103.9_ate, file = "objects/brm103.9_ate.rda")
+load(file = "objects/brm103.9_ate.rda")
+```
+
+Now we can summarize the posterior for the Bayesian ATE.
+
+```{r}
+brm103.9_ate %>% 
+  summarise(m = mean(ate),
+            s = sd(ate))
+```
+
+Note how the standard error (posterior SD) for this version of the ATE is a bit smaller than the previous model's, even though the coefficient for the `basec`-`period` interaction was not "statistically significant."
+
+This is also the same as if you computed it by hand with the $\beta$ posteriors.
+
+```{r}
+as_draws_df(brm103.9) %>% 
+  # simplify the names
+  rename(b0 = b_Intercept,
+         b1 = b_treatformoterol,
+         b2 = b_period2,
+         b3 = `b_treatformoterol:period2`) %>% 
+  # mutate() works fine, but transmute() removes the clutter
+  transmute(s1 = b0,
+            s2 = b0 + b2,
+            f1 = b0 + b1,
+            f2 = b0 + b1 + b2 + b3) %>% 
+  # compute the CATEs
+  mutate(`f1 - s1` = f1 - s1,
+         `f2 - s2` = f2 - s2) %>% 
+  # compute the ATE as the unweighted average of the CATEs
+  mutate(ate = (`f1 - s1` + `f2 - s2`) / 2) %>% 
+  summarise(m = mean(ate),
+            s = sd(ate))
+```
+
+Here's the ATE from the frequentist version of the model, using default SEs.
+
+```{r}
+avg_comparisons(fit103.9, 
+                newdata = d %>% 
+                  distinct(treat, period) %>% 
+                  mutate(basec = 0), 
+                variable = "treat",
+                re.form = NA)
+```
+
+The frequentist SE is also smaller when we include the `period`-by-`basec` interaction.
+
+We can take these interaction sensibilities even further to fit something of a multilevel cross-over trial ANHECOVA of the form
+
+$$
+\begin{align*}
+\text{pef}_{it} & \sim \mathcal N(\mu_{it}, \sigma) \\
+\mu_{it} & = \beta_0 + \beta_1 \text{treat}_{it} + \beta_2 \text{period}_{it} + \beta_3 \text{treat}_{it}\text{period}_{it} + \beta_4 \text{basec}_{it} + \beta_5 \text{basec}_{it}\text{period}_{it} + {\color{blueviolet}{\beta_6 \text{basec}_{it}\text{treat}_{it}}} + {\color{blueviolet}{\beta_7 \text{basec}_{it}\text{treat}_{it}\text{period}_{it}}} + u_i \\ 
+u_i & \sim \mathcal N(0, \sigma_u),
+\end{align*}
+$$
+
+where we now include a `basec`-by-`treat` interaction, and the three-way `basec`-by-`treat`-by-`period` interaction.
+
+Fit the model with `lmer()` and `brm()`.
+
+```{r}
+# frequentist with REML
+fit103.10 <- lmer(
+  data = d,
+  pef ~ treat + period + treat:period + basec + basec:period + basec:treat + basec:treat:period + (1 | patient)
+)
+
+# Bayesian with HMC
+brm103.10 <- brm(
+  data = d,
+  family = gaussian,
+  pef ~ 0 + Intercept + treat + period + treat:period + basec + basec:period + basec:treat + basec:treat:period + (1 | patient),
+  # default for the `pef ~ 1 + (1 | patient)` parameterization
+  prior = prior(student_t(3, 325, 81.5), class = b, coef = Intercept),
+  cores = 4, seed = 103,
+  file = "fits/brm103.10"
+)
+
+# summarize
+summary(fit103.10)
+summary(brm103.10)
+```
+
+Compute the ATE as Bayesians with our 2-step procedure.
+
+```{r, eval = F}
+# 6.922178 mins
+brm103.10_ate <- d %>% 
+  select(patient, period, base, basec) %>% 
+  expand_grid(treat = d %>% distinct(treat) %>% pull()) %>% 
+  arrange(patient, period, treat) %>% 
+  
+  add_epred_draws(brm103.10, ndraws = 4000) %>% 
+  ungroup() %>% 
+  group_by(period, patient, .draw) %>% 
+  compare_levels(variable = .epred, by = treat) %>% 
+  # average over patient, within each level of period and .draw
+  group_by(period, .draw) %>% 
+  summarise(`formoterol - salbutamol` = mean(.epred)) %>% 
+  # average over period, within each level of .draw
+  group_by(.draw) %>% 
+  summarise(ate = mean(`formoterol - salbutamol`))
+```
+
+```{r, echo = F}
+# save(brm103.10_ate, file = "objects/brm103.10_ate.rda")
+load(file = "objects/brm103.10_ate.rda")
+```
+
+Now summarize the posterior for the Bayesian ATE.
+
+```{r}
+brm103.10_ate %>% 
+  summarise(m = mean(ate),
+            s = sd(ate))
+```
+
+Hey, look at that; Now the posterior SD is a little larger. Sad.
+
+At this point, this is no longer the same as if you computed it by hand with the $\beta$ posteriors.
+
+```{r, warning = F}
+as_draws_df(brm103.10) %>% 
+  # simplify the names
+  rename(b0 = b_Intercept,
+         b1 = b_treatformoterol,
+         b2 = b_period2,
+         b3 = `b_treatformoterol:period2`) %>% 
+  # mutate() works fine, but transmute() removes the clutter
+  transmute(s1 = b0,
+            s2 = b0 + b2,
+            f1 = b0 + b1,
+            f2 = b0 + b1 + b2 + b3) %>% 
+  # compute the CATEs
+  mutate(`f1 - s1` = f1 - s1,
+         `f2 - s2` = f2 - s2) %>% 
+  # compute the ATE as the unweighted average of the CATEs
+  mutate(ate = (`f1 - s1` + `f2 - s2`) / 2) %>% 
+  summarise(m = mean(ate),
+            s = sd(ate))
+```
+
+This is not the ATE.
+
+### Focus on `seqn`.
+
+Now let's focus on the `seqn` covariate, instead. When we add `seqn` to the model, we remove the `treat`-by-`period` interaction, following the form
+
+$$
+\begin{align*}
+\text{pef}_{it} & \sim \mathcal N(\mu_{it}, \sigma) \\
+\mu_{it} & = \beta_0 + \beta_1 \text{treat}_{it} + \beta_2 \text{period}_{it} + {\color{blueviolet}{\beta_3 \text{seqn}_{i}}} + u_i \\ 
+u_i & \sim \mathcal N(0, \sigma_u).
+\end{align*}
+$$
+
+This is because the `seqn` variable includes information about both `treat` and `period`, and the model will not be identified if we include it along with the `treat`-by-`period` interaction from before. If you try fitting the model with the formula `pef ~ treat + period + treat:period + seqn + (1 | patient)` with `lmer()`, for example, you'll get a warning message informing you `fixed-effect model matrix is rank deficient so dropping 1 column / coefficient`. Try it out for yourself and see.
+
+```{r}
+# frequentist with REML
+fit103.11 <- lmer(
+  data = d,
+  # pef ~ treat + period + treat:period + seqn + (1 | patient)
+  # fixed-effect model matrix is rank deficient so dropping 1 column / coefficient
+  pef ~ treat + period + seqn + (1 | patient)
+)
+
+# Bayesian with HMC
+brm103.11 <- brm(
+  data = d,
+  family = gaussian,
+  pef ~ 0 + Intercept + treat + period + seqn + (1 | patient),
+  # default for the `pef ~ 1 + (1 | patient)` parameterization
+  prior = prior(student_t(3, 325, 81.5), class = b, coef = Intercept),
+  cores = 4, seed = 103,
+  file = "fits/brm103.11"
+)
+
+# summarize
+summary(fit103.11)
+summary(brm103.11)
+```
+
+The interesting thing about this parameterization is the $\beta$ coefficient for `treat` is now the same as the ATE, with a standard error that is the same as in the one from the multilevel-`pef` model without covariates (i.e., the once that included the `treat`-by-`period` interaction in place of the `seqn` term). Here's the proof by computing the ATE from the frequentist `fit103.7` model via `avg_comparisons()`.
+
+```{r}
+avg_comparisons(fit103.7, 
+                newdata = d %>% 
+                  distinct(treat, period), 
+                variable = "treat",
+                re.form = NA) %>% 
+  data.frame() %>% 
+  select(contrast:std.error) %>% 
+  mutate_if(is.double, round, digits = 3)
+```
+
+See? Same point estimate and SE as for the `seqn` coefficient in the `fit103.11` model.
+
+Now validate all this by computing the ATE as Bayesians with our 2-step procedure.
+
+```{r, eval = F}
+# 7.065912 mins
+brm103.11_ate <- d %>% 
+  distinct(treat, period, seqn) %>% 
+  expand_grid(patient = d %>% distinct(patient) %>% pull()) %>% 
+  
+  add_epred_draws(brm103.11, ndraws = 4000) %>% 
+  ungroup() %>% 
+  group_by(period, patient, .draw) %>% 
+  compare_levels(variable = .epred, by = treat) %>% 
+  # average over patient, within each level of period and .draw
+  group_by(period, .draw) %>% 
+  summarise(`formoterol - salbutamol` = mean(.epred)) %>% 
+  # average over period, within each level of .draw
+  group_by(.draw) %>% 
+  summarise(ate = mean(`formoterol - salbutamol`))
+```
+
+```{r, echo = F}
+# save(brm103.11_ate, file = "objects/brm103.11_ate.rda")
+load(file = "objects/brm103.11_ate.rda")
+```
+
+Summarize the posterior for the Bayesian ATE.
+
+```{r}
+brm103.11_ate %>% 
+  summarise(m = mean(ate),
+            s = sd(ate))
+```
+
+Though it won't be identical like with the frequentist examples, this summary of the Bayesian ATE is the same as the one from the `brm103.7` model, within MCMC error.
+
+```{r}
+brm103.7_ate %>% 
+  summarise(m = mean(ate),
+            s = sd(ate))
+```
+
+I'm not going to go through all the steps, but you can extend this simple `seqn` model to variants with other covariates, such as `basec`, just like we did with the `treat`-by-`period` versions of the model in the last section. Adding high-quality baseline covariates will generally reduce the posterior SD for the ATE.
+
+### Get distributional.
+
+As is often the case, our models so far have all been mean centric. Particularly with Bayesian software, we can generalize them by allowing $\sigma$ to vary. For example, we can extend the `seqn` model above to
+
+$$
+\begin{align*}
+\text{pef}_{it} & \sim \mathcal N(\mu_{it}, \sigma_{\color{blueviolet}{{it}}}) \\
+\mu_{it} & = \beta_0 + \beta_1 \text{treat}_{it} + \beta_2 \text{period}_{it} + \beta_3 \text{seqn}_{i} + u_i \\ 
+{\color{blueviolet}{\log(\sigma_{it})}} & = {\color{blueviolet}{\delta_{0, \text{group}}}} \\
+u_i & \sim \mathcal N(0, \sigma_u),
+\end{align*}
+$$
+
+where we have allowed $\log(\sigma_{it})$ to vary by what we're calling `group` in the equation. This is just a shorthand to indicate we are modeling the within-`person` variation separately by the 4 levels of the `treat`-by-`period` interaction. In principle, you could also parameterize this model as
+
+$$
+\begin{align*}
+\text{pef}_{it} & \sim \mathcal N(\mu_{it}, \sigma_{it}) \\
+\mu_{it} & = \beta_0 + \beta_1 \text{treat}_{it} + \beta_2 \text{period}_{it} + \beta_3 \text{seqn}_{i} + u_i \\ 
+\log(\sigma_{it}) & = {\color{blueviolet}{\delta_0 + \delta_1 \text{treat}_{it} + \delta_2 \text{period}_{it} + \delta_3 \text{seqn}_{i}}} \\
+u_i & \sim \mathcal N(0, \sigma_u),
+\end{align*}
+$$
+
+where the $\log(\sigma_{it})$ model mirrors the $\mu_{it}$ model (with the exception it has no $u_i$ parameter). In practice, however, I have found that models for $\log(\sigma_i)$ tend to be more fickle than models for $\mu_i$. They generally require larger sample sizes and tighter priors. Recall this data set contains only 26 cases, and it's already asking a lot of those data to describe the within-`patient` variation with 4 $\delta$ parameters. When you fith a model with $\delta$ parameters in this way, they will tend to have strong correlations among themselves, which isn't necessarilly a problem with larger data sets, but can be a challenge with small data sets like this. But when you parameterize the model with four separate $\delta_0$ parameters, like the first distributional model, you'll find those four parameters are largely uncorrelated with one another, which tends to make for HMC sampling.
+
+Speaking of which, for our distributional model, I'm going to go beyong the default `brm()` priors for the $\delta_0$ parameters to help improve the sampling. In the simpler `brm103.11` model, the posterior mean for $\sigma$ was about 30.9.
+
+```{r}
+posterior_summary(brm103.11)["sigma", ]
+```
+
+I'm going to center the priors for $\delta_{0, \text{group}}$ on the log of that value (recall the distributional model models $\log(\sigma)$, not $\sigma$ directly), with a standard deviation of 0.5. Here's what such a prior implies for each of the 4 levels of $\sigma_\text{group}$ in terms of the percentila-based 95% interval, and prior median.
+
+```{r}
+exp(log(30.9) + c(-1:1))
+```
+
+That's a pretty wide spread, and will serve our purposes well. For real-world data analysis, you'll need to put in more theory-based thought into your priors, rather than pulling them from previous models (which is cheating).
+
+As to fitting the model with `brm()`, we actually achieve that $\delta_{0, \text{group}}$ parameterization with the `sigma ~ 0 + interaction(treat, period)` syntax. Also note we have adjusted the `adapt_delta` settings within the `control` argument. As I said, $\log(\sigma)$ models can be fickle, particularly with small data sets.
+
+```{r}
+brm103.12 <- brm(
+  data = d,
+  family = gaussian,
+  bf(pef ~ 0 + Intercept + treat + period + seqn + (1 | patient),
+     sigma ~ 0 + interaction(treat, period)),
+  prior = prior(student_t(3, 325, 81.5), class = b, coef = Intercept) +
+    # log(sigma) model
+    prior(normal(log(30.9), 0.5), class = b, dpar = sigma),
+  cores = 4, seed = 103,
+  control = list(adapt_delta = .99),
+  file = "fits/brm103.12"
+)
+
+# summarize
+summary(brm103.12)
+```
+
+Sadly, in this case the SD for the ATE *increased*.
+
+```{r}
+fixef(brm103.11)["treatformoterol", ]
+fixef(brm103.12)["treatformoterol", ]
+```
+
+This probably won't always be the case.
+
+## Session information
+
+```{r}
+sessionInfo()
+```
+
